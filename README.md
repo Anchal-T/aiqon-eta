@@ -12,7 +12,7 @@ what the model expects next.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-make data      # writes data/raw/shipments.csv and data/raw/truth.csv
+make data      # writes data/raw/ and data/interim/
 make test      # runs the test suite
 ```
 
@@ -31,8 +31,24 @@ come out of it:
 
 300 shipments over 19 route templates, 55% of them connecting through one
 hub. The raw file is deliberately complete: no missing timestamps. Missing
-logs are simulated in a later step so the generator stays the one place where
-the world is defined.
+logs are simulated in a separate step so the generator stays the one place
+where the world is defined.
+
+`make data` then produces three more files under `data/interim/`:
+
+| File | What it is |
+| --- | --- |
+| `observed.csv` | The shipments as the system sees them, with part of the logs missing. |
+| `hidden_mask.csv` | Every hidden cell: the shipment, the column, the value that was there. |
+| `delays.csv` | One row per shipment: the delay of each stage, the delay each stage added, and whether that added delay covers a merged span. |
+
+Only `act_port_done` and `act_customs` are ever hidden. The departure is
+always there and the delivery is the target, so neither is ever touched.
+
+The random draws behind the holes are made once per cell and thresholded by
+the rate, so the hidden sets nest: the cells hidden at rate 0.1 are a subset
+of those hidden at 0.2. The missing-rate sweep then compares the same world
+at different rates rather than different worlds.
 
 ## How the delays work
 
@@ -69,9 +85,23 @@ learned from the data.
 ```
 src/config.py     every constant, in three groups: model-visible, generator-only, run settings
 src/generate.py   the generator
-tests/            T3 (the specimen arithmetic) and T5 (reproducibility), plus the data contract
+src/ingest.py     reads the raw file, types it, checks it against the contract
+src/missingness.py hides part of the logs and records what it hid
+src/delays.py     the delay of each stage and the delay each stage added
+tests/            T3, T4, T5 and the data contract
 data/raw/         generated data
+data/interim/     observed logs, the mask, and the delay table
 ```
+
+## The gap rule
+
+When a stage is hidden we cannot say what it added. The next stage we can
+see is compared against the last one we could see, and its added delay
+covers a span of the journey rather than a single stage. That is flagged in
+`merged_<stage>` instead of being passed off as a clean number.
+
+Direct shipments never have hub stages. Those are not applicable, not
+hidden, so they are skipped without flagging a gap.
 
 ## Honest limits
 

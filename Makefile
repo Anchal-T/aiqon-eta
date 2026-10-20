@@ -6,6 +6,9 @@ all: data
 
 data:
 	$(PY) -m src.generate --out data/raw
+	$(PY) -m src.ingest
+	$(PY) -m src.missingness
+	$(PY) -m src.delays
 
 features:
 	@echo "features: not implemented yet (Phase 2)"

@@ -5,7 +5,6 @@ Covers T3 and T5 from the LLD (section 7) and the data contract of section 5.
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 import pytest
 
