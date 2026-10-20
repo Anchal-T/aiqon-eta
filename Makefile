@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 
-.PHONY: all data features splits train eval explain test clean
+.PHONY: all data features splits baselines train eval explain test clean
 
 all:
 	$(PY) -m src.pipeline all
@@ -13,6 +13,9 @@ features:
 
 splits:
 	$(PY) -m src.pipeline splits
+
+baselines:
+	$(PY) -m src.pipeline baselines
 
 train:
 	@echo "train: not implemented yet (Phase 4)"

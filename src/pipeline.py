@@ -12,7 +12,16 @@ from typing import Literal, Sequence
 import pandas as pd
 import pyarrow as pa
 
-from src import config, delays, features, generate, ingest, missingness, splits
+from src import (
+    baselines,
+    config,
+    delays,
+    features,
+    generate,
+    ingest,
+    missingness,
+    splits,
+)
 from src.errors import ArtifactError, ConfigurationError, PipelineError
 
 
@@ -27,6 +36,7 @@ class ArtifactPaths:
     delays: Path = Path("data/interim/delays.csv")
     stacked: Path = Path("data/processed/stacked.parquet")
     splits: Path = Path("data/processed/splits.csv")
+    baseline_predictions: Path = Path("data/processed/baseline_predictions.csv")
 
 
 class EtaPipeline:
@@ -77,12 +87,30 @@ class EtaPipeline:
         )
         _write_artifact(splits.create_splits(stacked, self.settings), self.paths.splits)
 
-    def run_to(self, target: Literal["data", "features", "splits"]) -> None:
+    def build_baselines(
+        self,
+        stacked_path: Path | None = None,
+        splits_path: Path | None = None,
+    ) -> None:
+        """Generate held-out baseline predictions from features and splits."""
+        stacked = _read_artifact(
+            stacked_path if stacked_path is not None else self.paths.stacked
+        )
+        split_manifest = _read_artifact(
+            splits_path if splits_path is not None else self.paths.splits
+        )
+        predictions = baselines.predict(stacked, split_manifest)
+        _write_artifact(predictions, self.paths.baseline_predictions)
+
+    def run_to(
+        self, target: Literal["data", "features", "splits", "baselines"]
+    ) -> None:
         """Run the default prerequisite chain through ``target`` once."""
         stages = (
             ("data", self.build_data),
             ("features", self.build_features),
             ("splits", self.build_splits),
+            ("baselines", self.build_baselines),
         )
         targets = tuple(name for name, _ in stages)
         try:
@@ -94,8 +122,8 @@ class EtaPipeline:
             build_stage()
 
     def run_all(self) -> None:
-        """Run the complete data, feature, and split pipeline once."""
-        self.run_to("splits")
+        """Run all currently implemented pipeline stages once."""
+        self.run_to("baselines")
 
 
 def _write_artifact(table: pd.DataFrame, path: Path) -> None:
@@ -141,7 +169,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build ETA pipeline artifacts.")
     subparsers = parser.add_subparsers(dest="target", required=True)
 
-    for target in ("all", "data", "features", "splits"):
+    for target in ("all", "data", "features", "splits", "baselines"):
         command = subparsers.add_parser(target)
         command.add_argument("--seed", type=int)
         command.add_argument("--n-shipments", type=int)
@@ -156,6 +184,10 @@ def _parser() -> argparse.ArgumentParser:
         elif target == "splits":
             command.add_argument("--stacked", type=Path)
             command.add_argument("--out", type=Path)
+        elif target == "baselines":
+            command.add_argument("--stacked", type=Path)
+            command.add_argument("--splits", type=Path)
+            command.add_argument("--out", type=Path)
 
     return parser
 
@@ -166,6 +198,7 @@ def _run_target(pipeline: EtaPipeline, args: argparse.Namespace) -> None:
         "data": lambda: pipeline.run_to("data"),
         "features": lambda: pipeline.run_to("features"),
         "splits": lambda: pipeline.run_to("splits"),
+        "baselines": lambda: pipeline.run_to("baselines"),
     }
     explicit_actions = {
         "data": (
@@ -180,6 +213,11 @@ def _run_target(pipeline: EtaPipeline, args: argparse.Namespace) -> None:
         "splits": (
             getattr(args, "stacked", None) is not None,
             lambda: pipeline.build_splits(args.stacked),
+        ),
+        "baselines": (
+            getattr(args, "stacked", None) is not None
+            or getattr(args, "splits", None) is not None,
+            lambda: pipeline.build_baselines(args.stacked, args.splits),
         ),
     }
     use_explicit_input, explicit_action = explicit_actions.get(
@@ -214,6 +252,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             paths = replace(paths, stacked=args.out / paths.stacked.name)
         elif args.target == "splits" and args.out is not None:
             paths = replace(paths, splits=args.out / paths.splits.name)
+        elif args.target == "baselines" and args.out is not None:
+            paths = replace(
+                paths,
+                baseline_predictions=args.out / paths.baseline_predictions.name,
+            )
 
         pipeline = EtaPipeline(settings, paths)
         _run_target(pipeline, args)

@@ -16,13 +16,18 @@ make all       # builds raw, interim, and processed artifacts
 make test      # runs the test suite
 ```
 
-`make all` runs the implemented data, feature, and split steps through the
-central `src.pipeline` orchestrator. `make features` and `make splits` build
-their prerequisites automatically. To start from existing upstream artifacts,
-use `.venv/bin/python -m src.pipeline data --raw PATH`,
-`.venv/bin/python -m src.pipeline features --observed PATH --delays PATH`, or
-`.venv/bin/python -m src.pipeline splits --stacked PATH`. Training, evaluation,
-and explanations land in later phases.
+`make all` runs data generation, features, splits, and held-out baselines
+through the central `src.pipeline` orchestrator. `make features`, `make splits`,
+and `make baselines` build their prerequisites automatically. To start from
+existing upstream artifacts, use:
+
+```bash
+.venv/bin/python -m src.pipeline data --raw PATH
+.venv/bin/python -m src.pipeline features --observed PATH --delays PATH
+.venv/bin/python -m src.pipeline splits --stacked PATH
+```
+
+Model training, evaluation, and explanations remain future phases.
 
 ## The data
 
@@ -49,6 +54,11 @@ where the world is defined.
 
 Only `act_port_done` and `act_customs` are ever hidden. The departure is
 always there and the delivery is the target, so neither is ever touched.
+
+`make all` also writes `data/processed/baseline_predictions.csv`, with one
+held-out prediction per split seed, shipment, checkpoint, and baseline. B0
+predicts zero delay, B1 predicts the journey mean from outer-training shipments,
+and B2 predicts `delay_so_far`.
 
 The random draws behind the holes are made once per cell and thresholded by
 the rate, so the hidden sets nest: the cells hidden at rate 0.1 are a subset
@@ -98,10 +108,11 @@ src/delays.py     pure stage-delay calculation
 src/checkpoints.py checkpoint visibility rules
 src/features.py   checkpoint-stacked feature and target transform
 src/splits.py     repeated shipment-level train/test and CV assignments
-tests/            data contract, delay arithmetic, missingness, feature visibility and split leakage
+src/baselines.py  held-out B0, B1, and B2 reference predictions
+tests/            data contracts, arithmetic, leakage, splits, and baseline checks
 data/raw/         generated data
 data/interim/     observed logs, the mask, and the delay table
-data/processed/   stacked features and split assignments
+data/processed/   stacked features, splits, and baseline predictions
 ```
 
 ## The gap rule

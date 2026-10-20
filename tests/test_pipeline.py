@@ -20,19 +20,21 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         delays=tmp_path / "interim" / "delays.csv",
         stacked=tmp_path / "processed" / "stacked.parquet",
         splits=tmp_path / "processed" / "splits.csv",
+        baseline_predictions=tmp_path / "processed" / "baseline_predictions.csv",
     )
 
 
-def test_run_to_splits_executes_each_stage_once(monkeypatch):
+def test_run_to_baselines_executes_each_stage_once(monkeypatch):
     pipeline = EtaPipeline()
     calls = []
     monkeypatch.setattr(pipeline, "build_data", lambda: calls.append("data"))
     monkeypatch.setattr(pipeline, "build_features", lambda: calls.append("features"))
     monkeypatch.setattr(pipeline, "build_splits", lambda: calls.append("splits"))
+    monkeypatch.setattr(pipeline, "build_baselines", lambda: calls.append("baselines"))
 
-    pipeline.run_to("splits")
+    pipeline.run_to("baselines")
 
-    assert calls == ["data", "features", "splits"]
+    assert calls == ["data", "features", "splits", "baselines"]
 
 
 def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
@@ -50,6 +52,7 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.delays,
             paths.stacked,
             paths.splits,
+            paths.baseline_predictions,
         )
     )
     assert (
@@ -59,6 +62,11 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
         config.DEFAULT_RUN_SETTINGS.n_shipments
         * config.DEFAULT_RUN_SETTINGS.n_split_seeds
     )
+    assert set(pd.read_csv(paths.baseline_predictions)["baseline"]) == {
+        "B0",
+        "B1",
+        "B2",
+    }
 
 
 def test_artifact_read_error_includes_path_and_cause(tmp_path):
