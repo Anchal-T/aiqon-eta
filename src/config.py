@@ -59,7 +59,9 @@ PORT_NORMS: dict[str, PortNorm] = {
     "Durban": PortNorm(dwell_base_h=20.0, customs_base_h=22.0, base_congestion=1.3),
     "Hamburg": PortNorm(dwell_base_h=16.0, customs_base_h=18.0, base_congestion=1.2),
     "Jebel_Ali": PortNorm(dwell_base_h=14.0, customs_base_h=12.0, base_congestion=0.9),
-    "Los_Angeles": PortNorm(dwell_base_h=20.0, customs_base_h=20.0, base_congestion=1.3),
+    "Los_Angeles": PortNorm(
+        dwell_base_h=20.0, customs_base_h=20.0, base_congestion=1.3
+    ),
     "Mumbai": PortNorm(dwell_base_h=16.0, customs_base_h=18.0, base_congestion=1.2),
     "New_York": PortNorm(dwell_base_h=22.0, customs_base_h=22.0, base_congestion=1.4),
     "Rotterdam": PortNorm(dwell_base_h=15.0, customs_base_h=20.0, base_congestion=1.5),
@@ -191,6 +193,7 @@ MISSING_RATE = 0.10
 DELAY_THRESHOLD_H = 6.0
 TEST_FRAC = 0.20
 CV_FOLDS = 5
+N_SPLIT_SEEDS = 5
 
 #: Departure window for generated shipments, in days.
 DEPARTURE_WINDOW_DAYS = 90

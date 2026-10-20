@@ -6,8 +6,10 @@ pytest==9.1.1
 # Phase 2: Parquet output for the stacked feature table.
 pyarrow
 
+# Phase 3: stratified shipment-level splits.
+scikit-learn
+
 # Phases 4-6. Installed when those phases start.
 lightgbm
 shap
 matplotlib
-scikit-learn

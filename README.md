@@ -12,12 +12,12 @@ what the model expects next.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-make all       # writes raw/interim data and data/processed/stacked.parquet
+make all       # writes data and data/processed/stacked.parquet + splits.csv
 make test      # runs the test suite
 ```
 
-`make all` runs the implemented data and feature steps. Training, evaluation
-and explanations land in later phases.
+`make all` runs the implemented data, feature and split steps. Training,
+evaluation and explanations land in later phases.
 
 ## The data
 
@@ -90,10 +90,11 @@ src/missingness.py hides part of the logs and records what it hid
 src/delays.py     the delay of each stage and the delay each stage added
 src/checkpoints.py checkpoint visibility rules
 src/features.py   checkpoint-stacked features and targets
-tests/            data contract, delay arithmetic, missingness and feature visibility
+src/splits.py     repeated shipment-level train/test and CV assignments
+tests/            data contract, delay arithmetic, missingness, feature visibility and split leakage
 data/raw/         generated data
 data/interim/     observed logs, the mask, and the delay table
-data/processed/   checkpoint-stacked feature table
+data/processed/   stacked features and split assignments
 ```
 
 ## The gap rule
