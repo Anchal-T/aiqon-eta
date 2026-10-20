@@ -5,6 +5,8 @@ Covers T3 and T5 from the LLD (section 7) and the data contract of section 5.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
@@ -86,15 +88,20 @@ def test_specimen_is_the_lld_route(shipments):
 
 
 def test_same_seed_gives_identical_data():
-    first = generate.generate(seed=7, n_shipments=40)
-    second = generate.generate(seed=7, n_shipments=40)
+    settings = replace(config.DEFAULT_RUN_SETTINGS, seed=7, n_shipments=40)
+    first = generate.generate(settings=settings)
+    second = generate.generate(settings=settings)
     pd.testing.assert_frame_equal(first[0], second[0])
     pd.testing.assert_frame_equal(first[1], second[1])
 
 
 def test_a_different_seed_changes_the_data():
-    first = generate.generate(seed=7, n_shipments=40)[0]
-    second = generate.generate(seed=8, n_shipments=40)[0]
+    first = generate.generate(
+        settings=replace(config.DEFAULT_RUN_SETTINGS, seed=7, n_shipments=40)
+    )[0]
+    second = generate.generate(
+        settings=replace(config.DEFAULT_RUN_SETTINGS, seed=8, n_shipments=40)
+    )[0]
     assert not first.equals(second)
 
 
@@ -104,8 +111,9 @@ def test_a_different_seed_changes_the_data():
 
 
 def test_shipments_have_the_expected_shape(shipments):
-    assert len(shipments) == config.N_SHIPMENTS
-    assert list(shipments.shipment_id) == [f"S{i:03d}" for i in range(config.N_SHIPMENTS)]
+    n_shipments = config.DEFAULT_RUN_SETTINGS.n_shipments
+    assert len(shipments) == n_shipments
+    assert list(shipments.shipment_id) == [f"S{i:03d}" for i in range(n_shipments)]
     assert shipments.shipment_id.is_unique
 
 
@@ -126,7 +134,12 @@ def test_no_applicable_actual_timestamp_is_missing(shipments):
 
 def test_hub_columns_are_empty_exactly_for_direct_shipments(shipments):
     connecting = shipments.hub.notna()
-    for column in ("sched_hub_arrival", "sched_hub_departure", "act_hub_arrival", "act_hub_departure"):
+    for column in (
+        "sched_hub_arrival",
+        "sched_hub_departure",
+        "act_hub_arrival",
+        "act_hub_departure",
+    ):
         assert shipments.loc[connecting, column].notna().all(), column
         assert shipments.loc[~connecting, column].isna().all(), column
     for column in ("weather_leg2", "congestion_hub", "hub_buffer_h"):
@@ -195,8 +208,10 @@ def test_missed_slot_happens_exactly_when_the_window_runs_out(shipments, truth):
 def test_missing_the_berth_slot_costs_about_the_penalty(shipments, truth):
     merged = shipments.merge(truth, on="shipment_id")
     dwell_extra = merged.apply(
-        lambda r: (r.act_port_done - r.act_port_arrival).total_seconds() / 3600.0
-        - config.PORT_NORMS[r.destination].dwell_base_h,
+        lambda r: (
+            (r.act_port_done - r.act_port_arrival).total_seconds() / 3600.0
+            - config.PORT_NORMS[r.destination].dwell_base_h
+        ),
         axis=1,
     )
     missed = merged.missed_slot
@@ -210,5 +225,8 @@ def test_a_storm_shows_up_on_its_own_leg(shipments, truth):
         lambda r: _delay_hours(r, "hub_arrival") - _delay_hours(r, "departure"), axis=1
     )
     storm = merged.storm_leg1
-    assert added_leg1[connecting & storm].mean() > added_leg1[connecting & ~storm].mean() + 10.0
+    assert (
+        added_leg1[connecting & storm].mean()
+        > added_leg1[connecting & ~storm].mean() + 10.0
+    )
     assert merged.storm_leg1.sum() > 0 and merged.storm_leg2.sum() > 0

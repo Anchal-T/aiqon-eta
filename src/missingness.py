@@ -19,16 +19,11 @@ The mask holds a timestamp in its ``true_value`` column.  Read it back with
 
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
-from src import config, ingest
-
-OBSERVED_PATH = Path("data/interim/observed.csv")
-MASK_PATH = Path("data/interim/hidden_mask.csv")
+from src import config
+from src.errors import ContractError
 
 #: The only milestones that may go missing.
 HIDEABLE = ("act_port_done", "act_customs")
@@ -40,29 +35,29 @@ PROTECTED = ("act_departure", "act_delivery")
 
 def hide(
     table: pd.DataFrame,
-    rate: float = config.MISSING_RATE,
-    seed: int = config.SEED,
+    settings: config.RunSettings = config.DEFAULT_RUN_SETTINGS,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return the observed table with holes, and the mask of what was hidden.
 
     The mask has one row per hidden cell: the shipment, the column and the
     value that was there.
     """
-    if not 0.0 <= rate <= 1.0:
-        raise ValueError(f"missing rate must be between 0 and 1, got {rate}")
-
-    protected = set(HIDEABLE) & set(PROTECTED)
-    if protected:
-        raise ValueError(f"{sorted(protected)} must never be hidden")
+    missing = sorted({"shipment_id", *HIDEABLE} - set(table.columns))
+    if missing:
+        raise ContractError(f"raw table is missing columns: {missing}")
+    if table["shipment_id"].isna().any() or table["shipment_id"].duplicated().any():
+        raise ContractError("raw shipment_id values must be present and unique")
+    if table[list(HIDEABLE)].isna().any().any():
+        raise ContractError("raw hideable actual timestamps must be complete")
 
     # A stream of its own, so that changing the generator cannot shift the
     # holes around.
-    rng = np.random.default_rng([seed, 1])
+    rng = np.random.default_rng([settings.seed, 1])
 
     observed = table.copy()
     records: list[dict] = []
     for column in HIDEABLE:
-        hidden = rng.random(len(table)) < rate
+        hidden = rng.random(len(table)) < settings.missing_rate
         for position in np.flatnonzero(hidden):
             records.append(
                 {
@@ -75,30 +70,3 @@ def hide(
 
     mask = pd.DataFrame(records, columns=["shipment_id", "column", "true_value"])
     return observed, mask
-
-
-def write(observed: pd.DataFrame, mask: pd.DataFrame, out_dir: Path) -> None:
-    """Write the observed table and the mask."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    observed.to_csv(out_dir / OBSERVED_PATH.name, index=False)
-    mask.to_csv(out_dir / MASK_PATH.name, index=False)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Hide part of the observed milestones.")
-    parser.add_argument("--raw", type=Path, default=ingest.RAW_PATH)
-    parser.add_argument("--out", type=Path, default=Path("data/interim"))
-    parser.add_argument("--rate", type=float, default=config.MISSING_RATE)
-    parser.add_argument("--seed", type=int, default=config.SEED)
-    args = parser.parse_args()
-
-    table = ingest.load(args.raw)
-    observed, mask = hide(table, rate=args.rate, seed=args.seed)
-    write(observed, mask, args.out)
-    print(
-        f"hid {len(mask)} cells at rate {args.rate} -> {args.out / OBSERVED_PATH.name}"
-    )
-
-
-if __name__ == "__main__":
-    main()

@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 import pytest
+from src.pipeline import ArtifactPaths
 
 from src import checkpoints, config, ingest, splits
 
 
 @pytest.fixture(scope="module")
 def stacked() -> pd.DataFrame:
-    shipments: pd.DataFrame = ingest.load()
+    shipments: pd.DataFrame = ingest.load(ArtifactPaths().raw_shipments)
     rows = [
         {
             "shipment_id": shipment["shipment_id"],
@@ -30,7 +33,7 @@ def manifest(stacked: pd.DataFrame) -> pd.DataFrame:
 
 def test_each_seed_assigns_every_shipment_once(stacked, manifest):
     expected_ids = set(stacked["shipment_id"])
-    assert set(manifest["split_seed"]) == set(splits.SPLIT_SEEDS)
+    assert set(manifest["split_seed"]) == set(config.DEFAULT_RUN_SETTINGS.split_seeds)
 
     for seed, assignments in manifest.groupby("split_seed"):
         assert assignments["shipment_id"].is_unique
@@ -44,7 +47,7 @@ def test_each_seed_assigns_every_shipment_once(stacked, manifest):
         )
         assert set(
             assignments.loc[assignments["outer_split"] == "train", "fold"]
-        ) == set(range(config.CV_FOLDS))
+        ) == set(range(config.DEFAULT_RUN_SETTINGS.cv_folds))
 
 
 def test_t2_all_checkpoint_rows_stay_on_one_side(stacked, manifest):
@@ -66,8 +69,9 @@ def test_outer_split_is_stratified_by_journey(stacked, manifest):
 
 
 def test_split_assignments_are_reproducible(stacked):
-    first = splits.create_splits(stacked, seeds=(42, 43))
-    second = splits.create_splits(stacked, seeds=(42, 43))
+    settings = replace(config.DEFAULT_RUN_SETTINGS, seed=42, n_split_seeds=2)
+    first = splits.create_splits(stacked, settings=settings)
+    second = splits.create_splits(stacked, settings=settings)
     pd.testing.assert_frame_equal(first, second)
 
 
@@ -76,14 +80,18 @@ def test_a_shipment_cannot_have_multiple_journeys(stacked):
     shipment_id = broken["shipment_id"].iloc[0]
     index = broken.index[broken["shipment_id"] == shipment_id][0]
     broken.loc[index, "journey_id"] = "different-journey"
+    settings = replace(config.DEFAULT_RUN_SETTINGS, seed=42, n_split_seeds=1)
     with pytest.raises(ValueError, match="exactly one journey_id"):
-        splits.create_splits(broken, seeds=(42,))
+        splits.create_splits(broken, settings=settings)
 
 
 def test_invalid_split_settings_are_rejected(stacked):
     with pytest.raises(ValueError, match="test fraction"):
-        splits.create_splits(stacked, test_frac=1.0)
+        settings = replace(config.DEFAULT_RUN_SETTINGS, test_frac=1.0)
+        splits.create_splits(stacked, settings=settings)
     with pytest.raises(ValueError, match="at least two CV folds"):
-        splits.create_splits(stacked, n_folds=1)
+        settings = replace(config.DEFAULT_RUN_SETTINGS, cv_folds=1)
+        splits.create_splits(stacked, settings=settings)
     with pytest.raises(ValueError, match="non-empty and unique"):
-        splits.create_splits(stacked, seeds=())
+        settings = replace(config.DEFAULT_RUN_SETTINGS, n_split_seeds=0)
+        splits.create_splits(stacked, settings=settings)

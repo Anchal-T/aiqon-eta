@@ -2,19 +2,17 @@ PY := .venv/bin/python
 
 .PHONY: all data features splits train eval explain test clean
 
-all: splits
+all:
+	$(PY) -m src.pipeline all
 
 data:
-	$(PY) -m src.generate --out data/raw
-	$(PY) -m src.ingest
-	$(PY) -m src.missingness
-	$(PY) -m src.delays
+	$(PY) -m src.pipeline data
 
-features: data
-	$(PY) -m src.features
+features:
+	$(PY) -m src.pipeline features
 
-splits: features
-	$(PY) -m src.splits
+splits:
+	$(PY) -m src.pipeline splits
 
 train:
 	@echo "train: not implemented yet (Phase 4)"

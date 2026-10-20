@@ -7,11 +7,12 @@ import pandas as pd
 import pytest
 
 from src import config, ingest
+from src.pipeline import ArtifactPaths
 
 
 @pytest.fixture(scope="module")
 def raw():
-    return ingest.load()
+    return ingest.load(ArtifactPaths().raw_shipments)
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +21,7 @@ def raw():
 
 
 def test_the_raw_file_loads(raw):
-    assert len(raw) == config.N_SHIPMENTS
+    assert len(raw) == config.DEFAULT_RUN_SETTINGS.n_shipments
     assert raw["shipment_id"].is_unique
 
 
@@ -135,7 +136,9 @@ def test_a_missing_column_is_rejected(raw, tmp_path):
 
 def test_a_duplicate_shipment_id_is_rejected(raw, tmp_path):
     broken = raw.copy()
-    broken.loc[broken.index[1], "shipment_id"] = broken.loc[broken.index[0], "shipment_id"]
+    broken.loc[broken.index[1], "shipment_id"] = broken.loc[
+        broken.index[0], "shipment_id"
+    ]
     path = tmp_path / "shipments.csv"
     broken.to_csv(path, index=False)
     with pytest.raises(ingest.ContractError, match="not unique"):

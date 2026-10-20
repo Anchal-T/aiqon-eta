@@ -6,15 +6,18 @@ milestones, and the hidden cells are exactly the ones the mask records.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 import pytest
+from src.pipeline import ArtifactPaths
 
-from src import ingest, missingness
+from src import config, ingest, missingness
 
 
 @pytest.fixture(scope="module")
 def raw():
-    return ingest.load()
+    return ingest.load(ArtifactPaths().raw_shipments)
 
 
 @pytest.fixture(scope="module")
@@ -67,34 +70,47 @@ def test_the_mask_carries_the_columns_the_contract_asks_for(hidden):
 
 
 def test_no_holes_at_rate_zero(raw):
-    observed, mask = missingness.hide(raw, rate=0.0)
+    settings = replace(config.DEFAULT_RUN_SETTINGS, missing_rate=0.0)
+    observed, mask = missingness.hide(raw, settings=settings)
     assert mask.empty
     assert observed.equals(raw)
 
 
 def test_the_observed_rate_is_close_to_the_requested_one(raw):
-    observed, mask = missingness.hide(raw, rate=0.1)
+    settings = replace(config.DEFAULT_RUN_SETTINGS, missing_rate=0.1)
+    observed, mask = missingness.hide(raw, settings=settings)
     expected = 0.1 * len(raw) * len(missingness.HIDEABLE)
     assert abs(len(mask) - expected) < 0.15 * expected
 
 
 def test_the_holes_are_reproducible(raw):
-    first = missingness.hide(raw, rate=0.2)[1]
-    second = missingness.hide(raw, rate=0.2)[1]
+    settings = replace(config.DEFAULT_RUN_SETTINGS, missing_rate=0.2)
+    first = missingness.hide(raw, settings=settings)[1]
+    second = missingness.hide(raw, settings=settings)[1]
     pd.testing.assert_frame_equal(first, second)
 
 
 def test_a_different_seed_gives_different_holes(raw):
-    first = missingness.hide(raw, rate=0.2, seed=1)[1]
-    second = missingness.hide(raw, rate=0.2, seed=2)[1]
+    first = missingness.hide(
+        raw, settings=replace(config.DEFAULT_RUN_SETTINGS, missing_rate=0.2, seed=1)
+    )[1]
+    second = missingness.hide(
+        raw, settings=replace(config.DEFAULT_RUN_SETTINGS, missing_rate=0.2, seed=2)
+    )[1]
     assert not first.equals(second)
 
 
 def test_the_hidden_sets_nest_as_the_rate_grows(raw):
     """The rate sweep has to compare the same world at different rates."""
-    small = missingness.hide(raw, rate=0.1)[1]
-    medium = missingness.hide(raw, rate=0.2)[1]
-    large = missingness.hide(raw, rate=0.3)[1]
+    small = missingness.hide(
+        raw, settings=replace(config.DEFAULT_RUN_SETTINGS, missing_rate=0.1)
+    )[1]
+    medium = missingness.hide(
+        raw, settings=replace(config.DEFAULT_RUN_SETTINGS, missing_rate=0.2)
+    )[1]
+    large = missingness.hide(
+        raw, settings=replace(config.DEFAULT_RUN_SETTINGS, missing_rate=0.3)
+    )[1]
 
     def keys(mask):
         return set(zip(mask["shipment_id"], mask["column"]))
@@ -104,4 +120,5 @@ def test_the_hidden_sets_nest_as_the_rate_grows(raw):
 
 def test_a_rate_outside_the_unit_interval_is_rejected(raw):
     with pytest.raises(ValueError):
-        missingness.hide(raw, rate=1.5)
+        settings = replace(config.DEFAULT_RUN_SETTINGS, missing_rate=1.5)
+        missingness.hide(raw, settings=settings)

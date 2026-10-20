@@ -12,12 +12,17 @@ what the model expects next.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-make all       # writes data and data/processed/stacked.parquet + splits.csv
+make all       # builds raw, interim, and processed artifacts
 make test      # runs the test suite
 ```
 
-`make all` runs the implemented data, feature and split steps. Training,
-evaluation and explanations land in later phases.
+`make all` runs the implemented data, feature, and split steps through the
+central `src.pipeline` orchestrator. `make features` and `make splits` build
+their prerequisites automatically. To start from existing upstream artifacts,
+use `.venv/bin/python -m src.pipeline data --raw PATH`,
+`.venv/bin/python -m src.pipeline features --observed PATH --delays PATH`, or
+`.venv/bin/python -m src.pipeline splits --stacked PATH`. Training, evaluation,
+and explanations land in later phases.
 
 ## The data
 
@@ -83,13 +88,15 @@ learned from the data.
 ## Layout
 
 ```
-src/config.py     every constant, in three groups: model-visible, generator-only, run settings
-src/generate.py   the generator
-src/ingest.py     reads the raw file, types it, checks it against the contract
-src/missingness.py hides part of the logs and records what it hid
-src/delays.py     the delay of each stage and the delay each stage added
+src/config.py     domain constants and validated run settings
+src/errors.py     contextual pipeline and data-contract errors
+src/pipeline.py   artifact paths, I/O, command line, and stage orchestration
+src/generate.py   pure synthetic shipment generator
+src/ingest.py     reads, types, and validates shipment tables
+src/missingness.py pure missingness transform
+src/delays.py     pure stage-delay calculation
 src/checkpoints.py checkpoint visibility rules
-src/features.py   checkpoint-stacked features and targets
+src/features.py   checkpoint-stacked feature and target transform
 src/splits.py     repeated shipment-level train/test and CV assignments
 tests/            data contract, delay arithmetic, missingness, feature visibility and split leakage
 data/raw/         generated data

@@ -26,9 +26,7 @@ the single place where the world is defined.
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -122,7 +120,9 @@ def _storm_delay(rng: np.random.Generator) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _build_schedule(route: Route, hub_buffer_h: float, departure: pd.Timestamp) -> Schedule:
+def _build_schedule(
+    route: Route, hub_buffer_h: float, departure: pd.Timestamp
+) -> Schedule:
     """Planned timestamps for one shipment."""
     if route.hub is not None:
         hub_arrival = _at(departure, route.leg1_h)
@@ -181,7 +181,9 @@ def _propagate(
         own += latents.storm_leg1_h
     duration = _leg_duration(route.leg1_h, delay, config.TRANSIT_ABSORB)
     arrival_1 = _at(actuals["departure"], duration + own)
-    leg1_target = schedule.hub_arrival if route.hub is not None else schedule.port_arrival
+    leg1_target = (
+        schedule.hub_arrival if route.hub is not None else schedule.port_arrival
+    )
     delay = _delay_hours(arrival_1, leg1_target)
 
     if route.hub is not None:
@@ -193,7 +195,9 @@ def _propagate(
         slack_remaining = (schedule.hub_buffer_h - config.MIN_CONNECT_H) - delay
         if slack_remaining < 0:
             truth["missed_connection"] = True
-            actuals["hub_departure"] = _at(schedule.hub_departure, config.NEXT_SAILING_WAIT_H)
+            actuals["hub_departure"] = _at(
+                schedule.hub_departure, config.NEXT_SAILING_WAIT_H
+            )
         else:
             extra = (
                 config.HUB_HANDLING_FACTOR
@@ -261,24 +265,38 @@ def _draw_latents(rng: np.random.Generator, route: Route) -> Latents:
     has_leg2 = route.hub is not None
     storm_leg2 = has_leg2 and bool(rng.random() < config.STORM_PROB)
     return Latents(
-        departure_delay_h=float(rng.normal(config.DEPARTURE_DELAY_MEAN_H, config.DEPARTURE_DELAY_SD_H)),
-        weather_leg1=round(float(rng.beta(config.WEATHER_BETA_A, config.WEATHER_BETA_B)), 6),
+        departure_delay_h=float(
+            rng.normal(config.DEPARTURE_DELAY_MEAN_H, config.DEPARTURE_DELAY_SD_H)
+        ),
+        weather_leg1=round(
+            float(rng.beta(config.WEATHER_BETA_A, config.WEATHER_BETA_B)), 6
+        ),
         leg1_noise_h=float(rng.normal(0.0, config.LEG_NOISE_SD_H)),
         storm_leg1=storm_leg1,
         storm_leg1_h=_storm_delay(rng) if storm_leg1 else 0.0,
-        weather_leg2=round(float(rng.beta(config.WEATHER_BETA_A, config.WEATHER_BETA_B)), 6)
+        weather_leg2=round(
+            float(rng.beta(config.WEATHER_BETA_A, config.WEATHER_BETA_B)), 6
+        )
         if has_leg2
         else 0.0,
         leg2_noise_h=float(rng.normal(0.0, config.LEG_NOISE_SD_H)) if has_leg2 else 0.0,
         storm_leg2=storm_leg2,
         storm_leg2_h=_storm_delay(rng) if storm_leg2 else 0.0,
-        congestion_hub=round(float(rng.lognormal(0.0, config.CONGESTION_LOGNORMAL_SD)), 6),
+        congestion_hub=round(
+            float(rng.lognormal(0.0, config.CONGESTION_LOGNORMAL_SD)), 6
+        ),
         congestion_port=round(
-            float(norm.base_congestion * rng.lognormal(0.0, config.CONGESTION_LOGNORMAL_SD)), 6
+            float(
+                norm.base_congestion
+                * rng.lognormal(0.0, config.CONGESTION_LOGNORMAL_SD)
+            ),
+            6,
         ),
         dwell_noise_h=float(rng.normal(0.0, config.DWELL_NOISE_SD_H)),
         customs_noise_h=float(rng.normal(0.0, config.CUSTOMS_NOISE_SD_H)),
-        truck_delay_h=float(rng.normal(config.TRUCK_DELAY_MEAN_H, config.TRUCK_DELAY_SD_H)),
+        truck_delay_h=float(
+            rng.normal(config.TRUCK_DELAY_MEAN_H, config.TRUCK_DELAY_SD_H)
+        ),
         hub_noise_h=float(rng.normal(0.0, config.HUB_DEPARTURE_NOISE_SD_H)),
     )
 
@@ -298,7 +316,9 @@ def _specimen() -> tuple[dict, dict]:
     route = config.SPECIMEN_ROUTE
     latents = Latents(
         departure_delay_h=3.7,
-        weather_leg1=round((5.21 / config.WEATHER_MAX_DELAY_H) ** (1 / config.WEATHER_EXPONENT), 6),
+        weather_leg1=round(
+            (5.21 / config.WEATHER_MAX_DELAY_H) ** (1 / config.WEATHER_EXPONENT), 6
+        ),
         leg1_noise_h=0.0,
         storm_leg1=False,
         storm_leg1_h=0.0,
@@ -314,7 +334,9 @@ def _specimen() -> tuple[dict, dict]:
         hub_noise_h=0.0,
     )
     schedule = _build_schedule(
-        route, hub_buffer_h=config.MIN_CONNECT_H + 6.0, departure=pd.Timestamp(config.SPECIMEN_DEPARTURE)
+        route,
+        hub_buffer_h=config.MIN_CONNECT_H + 6.0,
+        departure=pd.Timestamp(config.SPECIMEN_DEPARTURE),
     )
     actuals, truth = _propagate(route, schedule, latents)
     return _row(config.SPECIMEN_ID, route, schedule, actuals, latents), {
@@ -362,10 +384,10 @@ def _row(
 
 
 def generate(
-    seed: int = config.SEED, n_shipments: int = config.N_SHIPMENTS
+    settings: config.RunSettings = config.DEFAULT_RUN_SETTINGS,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate the raw shipments and truth tables."""
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(settings.seed)
     rows: list[dict] = []
     truths: list[dict] = []
 
@@ -374,9 +396,11 @@ def generate(
     truths.append(specimen_truth)
 
     start = pd.Timestamp(config.DEPARTURE_START)
-    for i in range(1, n_shipments):
+    for i in range(1, settings.n_shipments):
         route = config.ROUTES[int(rng.integers(len(config.ROUTES)))]
-        departure = start + pd.Timedelta(days=float(rng.integers(config.DEPARTURE_WINDOW_DAYS)))
+        departure = start + pd.Timedelta(
+            days=float(rng.integers(config.DEPARTURE_WINDOW_DAYS))
+        )
         hub_buffer_h = (
             config.MIN_CONNECT_H
             + float(rng.uniform(config.NOMINAL_SLACK_MIN_H, config.NOMINAL_SLACK_MAX_H))
@@ -390,21 +414,3 @@ def generate(
         truths.append({"shipment_id": f"S{i:03d}", **truth})
 
     return pd.DataFrame(rows), pd.DataFrame(truths)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate the raw shipment data.")
-    parser.add_argument("--seed", type=int, default=config.SEED)
-    parser.add_argument("--n-shipments", type=int, default=config.N_SHIPMENTS)
-    parser.add_argument("--out", type=Path, default=Path("data/raw"))
-    args = parser.parse_args()
-
-    shipments, truth = generate(args.seed, args.n_shipments)
-    args.out.mkdir(parents=True, exist_ok=True)
-    shipments.to_csv(args.out / "shipments.csv", index=False)
-    truth.to_csv(args.out / "truth.csv", index=False)
-    print(f"wrote {len(shipments)} shipments and {len(truth)} truth rows to {args.out}")
-
-
-if __name__ == "__main__":
-    main()

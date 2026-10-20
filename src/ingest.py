@@ -13,15 +13,11 @@ passes ``complete_actuals=False``.
 
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
 from src import config
-
-RAW_PATH = Path("data/raw/shipments.csv")
+from src.errors import ArtifactError, ContractError
 
 STRING_COLUMNS = ("shipment_id", "journey_id", "origin", "hub", "destination")
 FLOAT_COLUMNS = (
@@ -52,10 +48,6 @@ REQUIRED_COLUMNS = (
 ) + TIMESTAMP_COLUMNS
 
 
-class ContractError(ValueError):
-    """The data breaks the contract in LLD section 5."""
-
-
 #: A stage list paired with the mask of the shipments it applies to.
 StageGroups = tuple[tuple[tuple[str, ...], np.ndarray], ...]
 
@@ -77,13 +69,16 @@ def journey_id(table: pd.DataFrame) -> pd.Series:
     ).astype("string")
 
 
-def load(path: Path | str = RAW_PATH, *, complete_actuals: bool = True) -> pd.DataFrame:
+def load(path: Path | str, *, complete_actuals: bool = True) -> pd.DataFrame:
     """Read the shipments, type them, derive the missing fields, and validate.
 
     ``complete_actuals`` demands that every applicable actual timestamp is
     present.  That holds for the raw file and not for the observed one.
     """
-    table = pd.read_csv(path, parse_dates=list(TIMESTAMP_COLUMNS))
+    try:
+        table = pd.read_csv(path, parse_dates=list(TIMESTAMP_COLUMNS))
+    except (OSError, UnicodeError, ValueError, pd.errors.ParserError) as error:
+        raise ArtifactError(f"cannot read shipment artifact {path}: {error}") from error
     _cast(table)
 
     derived = journey_id(table)
@@ -106,19 +101,30 @@ def _cast(table: pd.DataFrame) -> None:
     """Give every column an explicit type."""
     for column in STRING_COLUMNS:
         if column in table.columns:
-            table[column] = table[column].astype("string")
+            _cast_column(table, column, "string")
     for column in FLOAT_COLUMNS:
         if column in table.columns:
-            table[column] = table[column].astype("float64")
+            _cast_column(table, column, "float64")
     for column in INT_COLUMNS:
         if column in table.columns:
-            table[column] = table[column].astype("int64")
+            _cast_column(table, column, "int64")
     for column in TIMESTAMP_COLUMNS:
         if column in table.columns:
-            try:
-                table[column] = pd.to_datetime(table[column])
-            except (TypeError, ValueError) as error:
-                raise ContractError(f"{column} holds a timestamp that cannot be parsed: {error}") from error
+            _cast_column(table, column, "timestamp")
+
+
+def _cast_column(table: pd.DataFrame, column: str, kind: str) -> None:
+    try:
+        if kind == "string":
+            table[column] = table[column].astype("string")
+        elif kind == "float64":
+            table[column] = table[column].astype("float64")
+        elif kind == "int64":
+            table[column] = table[column].astype("int64")
+        else:
+            table[column] = pd.to_datetime(table[column])
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ContractError(f"{column} cannot be parsed as {kind}: {error}") from error
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +153,9 @@ def _check_columns(table: pd.DataFrame) -> None:
     if missing:
         raise ContractError(f"the table is missing the columns {missing}")
 
+    if table["shipment_id"].isna().any():
+        raise ContractError("shipment_id must be present for every row")
+
     duplicated = table["shipment_id"].duplicated()
     if duplicated.any():
         raise ContractError(
@@ -174,7 +183,9 @@ def _check_hub_columns(table: pd.DataFrame) -> None:
     """Hub columns are empty if and only if the shipment has a hub."""
     connecting = table["hub"].notna()
     columns = [
-        f"{prefix}_{stage}" for prefix in ("sched", "act") for stage in config.HUB_STAGES
+        f"{prefix}_{stage}"
+        for prefix in ("sched", "act")
+        for stage in config.HUB_STAGES
     ]
     for column in columns:
         if table.loc[connecting, column].isna().any():
@@ -194,7 +205,9 @@ def _check_actual_timestamps(table: pd.DataFrame, groups: StageGroups) -> None:
 
 def _check_final_delay(table: pd.DataFrame) -> None:
     """The delivery delay is a finite number."""
-    delay = (table["act_delivery"] - table["sched_delivery"]).dt.total_seconds() / 3600.0
+    delay = (
+        table["act_delivery"] - table["sched_delivery"]
+    ).dt.total_seconds() / 3600.0
     if not np.isfinite(delay).all():
         raise ContractError("the final delay is not finite")
 
@@ -212,19 +225,3 @@ def _check_ranges(table: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Check the raw shipments against the contract.")
-    parser.add_argument("--in", dest="path", type=Path, default=RAW_PATH)
-    args = parser.parse_args()
-
-    table = load(args.path)
-    connecting = int(table["is_connecting"].sum())
-    print(
-        f"{len(table)} shipments ok: {connecting} connecting, {len(table) - connecting} direct"
-    )
-
-
-if __name__ == "__main__":
-    main()

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
+from src.pipeline import ArtifactPaths
 
 from src import config, delays, ingest, missingness
 
 
 @pytest.fixture(scope="module")
 def raw():
-    return ingest.load()
+    return ingest.load(ArtifactPaths().raw_shipments)
 
 
 @pytest.fixture(scope="module")
@@ -57,12 +58,12 @@ def test_the_added_delay_of_the_first_stage_is_the_delay_itself(computed):
         assert row["added_departure"] == pytest.approx(row["delay_departure"], abs=1e-9)
 
 
-def test_the_added_delay_is_the_difference_to_the_previous_known_stage(computed, observed):
+def test_the_added_delay_is_the_difference_to_the_previous_known_stage(
+    computed, observed
+):
     for _, row in computed.iterrows():
         source = observed.loc[row.name]
-        stages = (
-            config.STAGE_ORDER if source["is_connecting"] else config.DIRECT_STAGES
-        )
+        stages = config.STAGE_ORDER if source["is_connecting"] else config.DIRECT_STAGES
         previous = 0.0
         for stage in stages:
             value = row[f"delay_{stage}"]
@@ -100,7 +101,9 @@ def test_the_next_known_stage_is_measured_against_the_last_known_one(raw):
 def test_both_late_stages_hidden_merges_the_whole_tail(raw):
     broken = raw.copy()
     target = broken["shipment_id"].iloc[1]
-    broken.loc[broken["shipment_id"] == target, ["act_port_done", "act_customs"]] = pd.NaT
+    broken.loc[broken["shipment_id"] == target, ["act_port_done", "act_customs"]] = (
+        pd.NaT
+    )
     row = delays.compute(broken).iloc[1]
 
     # A hidden stage has no added delay of its own, so it carries no flag.
@@ -118,7 +121,9 @@ def test_both_late_stages_hidden_merges_the_whole_tail(raw):
 
 def test_an_ungapped_shipment_is_not_flagged(computed, observed):
     """A shipment with nothing hidden has no merged spans."""
-    complete = observed[observed["act_port_done"].notna() & observed["act_customs"].notna()]
+    complete = observed[
+        observed["act_port_done"].notna() & observed["act_customs"].notna()
+    ]
     rows = computed[computed["shipment_id"].isin(complete["shipment_id"])]
     for stage in config.STAGE_ORDER:
         assert not rows[f"merged_{stage}"].any(), stage

@@ -20,28 +20,42 @@ hidden, so they are skipped without flagging a gap.
 
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
-from src import config, ingest, missingness
+from src import config
+from src.errors import ContractError
 
-DELAYS_PATH = Path("data/interim/delays.csv")
+_REQUIRED_COLUMNS = {
+    "shipment_id",
+    "is_connecting",
+    *(f"sched_{stage}" for stage in config.STAGE_ORDER),
+    *(f"act_{stage}" for stage in config.STAGE_ORDER),
+}
 
 
 def compute(observed: pd.DataFrame) -> pd.DataFrame:
-    """One row per shipment with the delay arithmetic."""
+    """Calculate delays from the timestamp columns needed by this transform."""
+    missing = sorted(_REQUIRED_COLUMNS - set(observed.columns))
+    if missing:
+        raise ContractError(f"observed table is missing columns: {missing}")
+    if (
+        observed["shipment_id"].isna().any()
+        or observed["shipment_id"].duplicated().any()
+    ):
+        raise ContractError("observed shipment_id values must be present and unique")
+    if observed["is_connecting"].isna().any():
+        raise ContractError("observed is_connecting values must be present")
+    if observed["act_delivery"].isna().any():
+        raise ContractError("actual delivery timestamps must be present")
+
     records = [_shipment_delays(row) for _, row in observed.iterrows()]
     return pd.DataFrame(records)
 
 
 def _shipment_delays(shipment: pd.Series) -> dict:
     """The delays of one shipment, stage by stage."""
-    stages = (
-        config.STAGE_ORDER if shipment["is_connecting"] else config.DIRECT_STAGES
-    )
+    stages = config.STAGE_ORDER if shipment["is_connecting"] else config.DIRECT_STAGES
 
     delays: dict[str, float] = {}
     for stage in stages:
@@ -75,20 +89,3 @@ def _shipment_delays(shipment: pd.Series) -> dict:
         record[f"merged_{stage}"] = merged.get(stage, False)
     record["final_delay_h"] = delays["delivery"]
     return record
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Compute the delay numbers.")
-    parser.add_argument("--observed", type=Path, default=missingness.OBSERVED_PATH)
-    parser.add_argument("--out", type=Path, default=DELAYS_PATH.parent)
-    args = parser.parse_args()
-
-    observed = ingest.load(args.observed, complete_actuals=False)
-    delays = compute(observed)
-    args.out.mkdir(parents=True, exist_ok=True)
-    delays.to_csv(args.out / DELAYS_PATH.name, index=False)
-    print(f"wrote {len(delays)} delay rows -> {args.out / DELAYS_PATH.name}")
-
-
-if __name__ == "__main__":
-    main()

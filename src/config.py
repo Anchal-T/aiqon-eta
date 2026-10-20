@@ -16,6 +16,10 @@ has to be learned.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
+from numbers import Real
+
+from src.errors import ConfigurationError
 
 # ---------------------------------------------------------------------------
 # Stages
@@ -187,13 +191,68 @@ ROUTES: tuple[Route, ...] = (
 # Run settings
 # ---------------------------------------------------------------------------
 
-SEED = 42
-N_SHIPMENTS = 300
-MISSING_RATE = 0.10
-DELAY_THRESHOLD_H = 6.0
-TEST_FRAC = 0.20
-CV_FOLDS = 5
-N_SPLIT_SEEDS = 5
+
+@dataclass(frozen=True)
+class RunSettings:
+    """Validated settings shared by one pipeline run."""
+
+    seed: int = 42
+    n_shipments: int = 300
+    missing_rate: float = 0.10
+    delay_threshold_h: float = 6.0
+    test_frac: float = 0.20
+    cv_folds: int = 5
+    n_split_seeds: int = 5
+
+    def __post_init__(self) -> None:
+        for name in ("seed", "n_shipments", "cv_folds", "n_split_seeds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigurationError(f"{name} must be an integer, got {value!r}")
+
+        if self.seed < 0:
+            raise ConfigurationError(f"seed must be non-negative, got {self.seed}")
+        if self.n_shipments < 1:
+            raise ConfigurationError(
+                f"n_shipments must be at least one, got {self.n_shipments}"
+            )
+        if self.cv_folds < 2:
+            raise ConfigurationError(
+                f"at least two CV folds are required, got {self.cv_folds}"
+            )
+        if self.n_split_seeds < 1:
+            raise ConfigurationError(
+                f"split seeds must be non-empty and unique; got {self.n_split_seeds}"
+            )
+        for name in ("missing_rate", "delay_threshold_h", "test_frac"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not isfinite(value)
+            ):
+                raise ConfigurationError(
+                    f"{name} must be a finite number, got {value!r}"
+                )
+        if not 0.0 <= self.missing_rate <= 1.0:
+            raise ConfigurationError(
+                f"missing_rate must be between 0 and 1, got {self.missing_rate}"
+            )
+        if self.delay_threshold_h < 0.0:
+            raise ConfigurationError(
+                f"delay_threshold_h must be non-negative, got {self.delay_threshold_h}"
+            )
+        if not 0.0 < self.test_frac < 1.0:
+            raise ConfigurationError(
+                f"test fraction must be between 0 and 1, got {self.test_frac}"
+            )
+
+    @property
+    def split_seeds(self) -> tuple[int, ...]:
+        return tuple(range(self.seed, self.seed + self.n_split_seeds))
+
+
+DEFAULT_RUN_SETTINGS = RunSettings()
 
 #: Departure window for generated shipments, in days.
 DEPARTURE_WINDOW_DAYS = 90

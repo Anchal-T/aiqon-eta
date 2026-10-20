@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from src import checkpoints, config, delays, ingest, missingness
+from src import checkpoints, config
+from src.errors import ContractError
 
-STACKED_PATH = Path("data/processed/stacked.parquet")
 OBSERVED_STAGES = config.STAGE_ORDER[:-1]
 ROUTE_CATEGORICAL_FEATURES = ("journey_id", "origin", "hub", "destination")
 CATEGORICAL_FEATURES = (
@@ -114,16 +112,22 @@ def _category_code(column: str, value: Any) -> int:
     try:
         return CATEGORY_CODES[column][str(value)]
     except KeyError as error:
-        raise ValueError(f"unknown {column} category: {value}") from error
+        raise ContractError(f"unknown {column} category: {value}") from error
 
 
 def _build_feature_row(
-    shipment: Any, delay_row: Any, checkpoint: int
+    shipment: Any,
+    delay_row: Any,
+    checkpoint: int,
+    settings: config.RunSettings,
 ) -> dict[str, object]:
     is_connecting = bool(shipment["is_connecting"])
     visible = checkpoints.visible_stages(checkpoint, is_connecting)
     destination = str(shipment["destination"])
-    norm = config.PORT_NORMS[destination]
+    try:
+        norm = config.PORT_NORMS[destination]
+    except KeyError as error:
+        raise ContractError(f"unknown destination: {destination}") from error
 
     record: dict[str, object] = {column: np.nan for column in FEATURE_COLUMNS}
     record["shipment_id"] = str(shipment["shipment_id"])
@@ -207,44 +211,62 @@ def _build_feature_row(
 
     final_delay = float(delay_row["final_delay_h"])
     if not np.isfinite(final_delay):
-        raise ValueError(
+        raise ContractError(
             f"non-finite final delay for shipment {shipment['shipment_id']}"
         )
     record["final_delay_h"] = final_delay
     record["remaining_delay_h"] = final_delay - delay_so_far
-    record["is_delayed"] = final_delay > config.DELAY_THRESHOLD_H
+    record["is_delayed"] = final_delay > settings.delay_threshold_h
     return record
 
 
-def build(observed: pd.DataFrame, delay_table: pd.DataFrame) -> pd.DataFrame:
+def build(
+    observed: pd.DataFrame,
+    delay_table: pd.DataFrame,
+    settings: config.RunSettings = config.DEFAULT_RUN_SETTINGS,
+) -> pd.DataFrame:
     """Build the stacked feature table from contract-validated inputs.
 
-    ``observed`` must be loaded through :func:`ingest.load`, allowing expected
-    missing actuals, and ``delay_table`` must be the matching result of
-    :func:`delays.compute` on that table. Shipment identity is checked here;
-    the caller is responsible for passing corresponding values.
+    ``observed`` may have the expected missing actuals. ``delay_table`` must
+    contain matching shipment identities and numeric delay values.
     """
     missing_observed = sorted(_REQUIRED_OBSERVED - set(observed.columns))
     if missing_observed:
-        raise ValueError(f"observed table is missing columns: {missing_observed}")
+        raise ContractError(f"observed table is missing columns: {missing_observed}")
     missing_delays = sorted(_REQUIRED_DELAYS - set(delay_table.columns))
     if missing_delays:
-        raise ValueError(f"delay table is missing columns: {missing_delays}")
+        raise ContractError(f"delay table is missing columns: {missing_delays}")
     if bool(observed["shipment_id"].isna().any()) or bool(
         observed["shipment_id"].duplicated().any()
     ):
-        raise ValueError("observed shipment_id values must be present and unique")
+        raise ContractError("observed shipment_id values must be present and unique")
 
     delay_table = delay_table.copy()
     delay_table["shipment_id"] = delay_table["shipment_id"].astype("string")
     if bool(delay_table["shipment_id"].isna().any()) or bool(
         delay_table["shipment_id"].duplicated().any()
     ):
-        raise ValueError("delay shipment_id values must be present and unique")
+        raise ContractError("delay shipment_id values must be present and unique")
     observed_ids = set(observed["shipment_id"].astype(str))
     delay_ids = set(delay_table["shipment_id"].astype(str))
     if observed_ids != delay_ids:
-        raise ValueError("observed and delay tables must contain the same shipments")
+        missing_delays = sorted(observed_ids - delay_ids)
+        missing_observed = sorted(delay_ids - observed_ids)
+        raise ContractError(
+            "observed and delay tables must contain the same shipments; "
+            f"missing from delays: {missing_delays[:5]}, "
+            f"missing from observed: {missing_observed[:5]}"
+        )
+
+    for column in _REQUIRED_DELAYS - {"shipment_id"}:
+        values = pd.to_numeric(delay_table[column], errors="coerce")
+        invalid = delay_table[column].notna() & values.isna()
+        if invalid.any():
+            raise ContractError(f"delay column {column} contains non-numeric values")
+        delay_table[column] = values
+    if not np.isfinite(delay_table["final_delay_h"]).all():
+        raise ContractError("final_delay_h must be finite for every shipment")
+
     delay_by_id = delay_table.set_index("shipment_id")
 
     records = []
@@ -252,27 +274,7 @@ def build(observed: pd.DataFrame, delay_table: pd.DataFrame) -> pd.DataFrame:
         is_connecting = bool(shipment["is_connecting"])
         delay_row = delay_by_id.loc[str(shipment["shipment_id"])]
         for checkpoint in checkpoints.for_shipment(is_connecting):
-            records.append(_build_feature_row(shipment, delay_row, checkpoint))
+            records.append(
+                _build_feature_row(shipment, delay_row, checkpoint, settings)
+            )
     return pd.DataFrame.from_records(records, columns=OUTPUT_COLUMNS)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Build the checkpoint-stacked feature table."
-    )
-    parser.add_argument("--observed", type=Path, default=missingness.OBSERVED_PATH)
-    parser.add_argument("--delays", type=Path, default=delays.DELAYS_PATH)
-    parser.add_argument("--out", type=Path, default=STACKED_PATH.parent)
-    args = parser.parse_args()
-
-    observed = ingest.load(args.observed, complete_actuals=False)
-    delay_table = pd.read_csv(args.delays)
-    stacked = build(observed, delay_table)
-    args.out.mkdir(parents=True, exist_ok=True)
-    output = args.out / STACKED_PATH.name
-    stacked.to_parquet(output, index=False)
-    print(f"wrote {len(stacked)} checkpoint rows -> {output}")
-
-
-if __name__ == "__main__":
-    main()

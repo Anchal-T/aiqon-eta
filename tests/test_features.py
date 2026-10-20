@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -9,11 +10,12 @@ import pandas as pd
 import pytest
 
 from src import checkpoints, config, delays, features, ingest, missingness
+from src.pipeline import ArtifactPaths
 
 
 @pytest.fixture(scope="module")
 def raw() -> pd.DataFrame:
-    return ingest.load()
+    return ingest.load(ArtifactPaths().raw_shipments)
 
 
 @pytest.fixture(scope="module")
@@ -108,6 +110,20 @@ def test_hidden_late_stages_fall_back_and_set_flags(raw):
     assert c6["customs_missing"] == 1
     assert c6["delay_so_far"] == c6["delay_port_arrival"]
     assert c6["n_observed_stages"] == 4
+
+
+def test_observed_and_delay_mismatch_reports_shipment_ids(raw):
+    delay_table = delays.compute(raw).iloc[1:]
+
+    with pytest.raises(ingest.ContractError, match=config.SPECIMEN_ID):
+        features.build(raw, delay_table)
+
+
+def test_delay_threshold_comes_from_run_settings(raw):
+    observed, _ = missingness.hide(raw)
+    settings = replace(config.DEFAULT_RUN_SETTINGS, delay_threshold_h=1_000.0)
+    table = features.build(observed, delays.compute(observed), settings=settings)
+    assert not table["is_delayed"].any()
 
 
 def test_targets_are_derived_from_delay_so_far(stacked):
