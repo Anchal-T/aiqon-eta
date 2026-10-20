@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -21,20 +22,26 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         stacked=tmp_path / "processed" / "stacked.parquet",
         splits=tmp_path / "processed" / "splits.csv",
         baseline_predictions=tmp_path / "processed" / "baseline_predictions.csv",
+        model_r_predictions=tmp_path / "outputs" / "predictions" / "model_r.csv",
+        model_r_metrics=tmp_path / "outputs" / "metrics" / "model_r_vs_b2.csv",
     )
 
 
-def test_run_to_baselines_executes_each_stage_once(monkeypatch):
+def test_run_to_evaluation_executes_each_stage_once(monkeypatch):
     pipeline = EtaPipeline()
     calls = []
     monkeypatch.setattr(pipeline, "build_data", lambda: calls.append("data"))
     monkeypatch.setattr(pipeline, "build_features", lambda: calls.append("features"))
     monkeypatch.setattr(pipeline, "build_splits", lambda: calls.append("splits"))
     monkeypatch.setattr(pipeline, "build_baselines", lambda: calls.append("baselines"))
+    monkeypatch.setattr(pipeline, "build_model_r", lambda: calls.append("model_r"))
+    monkeypatch.setattr(
+        pipeline, "build_evaluation", lambda: calls.append("evaluation")
+    )
 
-    pipeline.run_to("baselines")
+    pipeline.run_to("evaluation")
 
-    assert calls == ["data", "features", "splits", "baselines"]
+    assert calls == ["data", "features", "splits", "baselines", "model_r", "evaluation"]
 
 
 def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
@@ -53,6 +60,8 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.stacked,
             paths.splits,
             paths.baseline_predictions,
+            paths.model_r_predictions,
+            paths.model_r_metrics,
         )
     )
     assert (
@@ -67,6 +76,15 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
         "B1",
         "B2",
     }
+    predictions = pd.read_csv(paths.model_r_predictions)
+    np.testing.assert_allclose(
+        predictions["predicted_final_delay_h"],
+        predictions["delay_so_far"] + predictions["predicted_remaining_delay_h"],
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    metrics = pd.read_csv(paths.model_r_metrics)
+    assert set(metrics["checkpoint"]) == set(range(7))
 
 
 def test_artifact_read_error_includes_path_and_cause(tmp_path):

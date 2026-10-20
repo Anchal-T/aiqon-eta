@@ -19,3 +19,7 @@ class ArtifactError(PipelineError):
 
 class SplitError(PipelineError, ValueError):
     """The shipment set cannot support the requested split."""
+
+
+class ModelError(PipelineError):
+    """A model could not be fit or used for prediction."""

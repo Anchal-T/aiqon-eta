@@ -16,10 +16,12 @@ from src import (
     baselines,
     config,
     delays,
+    evaluate,
     features,
     generate,
     ingest,
     missingness,
+    models,
     splits,
 )
 from src.errors import ArtifactError, ConfigurationError, PipelineError
@@ -37,6 +39,8 @@ class ArtifactPaths:
     stacked: Path = Path("data/processed/stacked.parquet")
     splits: Path = Path("data/processed/splits.csv")
     baseline_predictions: Path = Path("data/processed/baseline_predictions.csv")
+    model_r_predictions: Path = Path("outputs/predictions/model_r.csv")
+    model_r_metrics: Path = Path("outputs/metrics/model_r_vs_b2.csv")
 
 
 class EtaPipeline:
@@ -102,8 +106,45 @@ class EtaPipeline:
         predictions = baselines.predict(stacked, split_manifest)
         _write_artifact(predictions, self.paths.baseline_predictions)
 
+    def build_model_r(
+        self,
+        stacked_path: Path | None = None,
+        splits_path: Path | None = None,
+    ) -> None:
+        """Fit Model R and write its outer-test predictions."""
+        stacked = _read_artifact(
+            stacked_path if stacked_path is not None else self.paths.stacked
+        )
+        split_manifest = _read_artifact(
+            splits_path if splits_path is not None else self.paths.splits
+        )
+        model = models.ModelR(self.settings).fit(stacked, split_manifest)
+        _write_artifact(model.predict_test(), self.paths.model_r_predictions)
+
+    def build_evaluation(
+        self,
+        model_path: Path | None = None,
+        baselines_path: Path | None = None,
+    ) -> None:
+        """Compare Model R's held-out MAE with B2 by checkpoint."""
+        model_predictions = _read_artifact(
+            model_path if model_path is not None else self.paths.model_r_predictions
+        )
+        baseline_predictions = _read_artifact(
+            baselines_path
+            if baselines_path is not None
+            else self.paths.baseline_predictions
+        )
+        metrics = evaluate.compare_model_r_to_b2(
+            model_predictions, baseline_predictions
+        )
+        _write_artifact(metrics, self.paths.model_r_metrics)
+
     def run_to(
-        self, target: Literal["data", "features", "splits", "baselines"]
+        self,
+        target: Literal[
+            "data", "features", "splits", "baselines", "model_r", "evaluation"
+        ],
     ) -> None:
         """Run the default prerequisite chain through ``target`` once."""
         stages = (
@@ -111,6 +152,8 @@ class EtaPipeline:
             ("features", self.build_features),
             ("splits", self.build_splits),
             ("baselines", self.build_baselines),
+            ("model_r", self.build_model_r),
+            ("evaluation", self.build_evaluation),
         )
         targets = tuple(name for name, _ in stages)
         try:
@@ -123,7 +166,7 @@ class EtaPipeline:
 
     def run_all(self) -> None:
         """Run all currently implemented pipeline stages once."""
-        self.run_to("baselines")
+        self.run_to("evaluation")
 
 
 def _write_artifact(table: pd.DataFrame, path: Path) -> None:
@@ -169,7 +212,15 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build ETA pipeline artifacts.")
     subparsers = parser.add_subparsers(dest="target", required=True)
 
-    for target in ("all", "data", "features", "splits", "baselines"):
+    for target in (
+        "all",
+        "data",
+        "features",
+        "splits",
+        "baselines",
+        "model-r",
+        "eval",
+    ):
         command = subparsers.add_parser(target)
         command.add_argument("--seed", type=int)
         command.add_argument("--n-shipments", type=int)
@@ -188,6 +239,14 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--stacked", type=Path)
             command.add_argument("--splits", type=Path)
             command.add_argument("--out", type=Path)
+        elif target == "model-r":
+            command.add_argument("--stacked", type=Path)
+            command.add_argument("--splits", type=Path)
+            command.add_argument("--out", type=Path)
+        elif target == "eval":
+            command.add_argument("--model-r", type=Path)
+            command.add_argument("--baselines", type=Path)
+            command.add_argument("--out", type=Path)
 
     return parser
 
@@ -199,6 +258,8 @@ def _run_target(pipeline: EtaPipeline, args: argparse.Namespace) -> None:
         "features": lambda: pipeline.run_to("features"),
         "splits": lambda: pipeline.run_to("splits"),
         "baselines": lambda: pipeline.run_to("baselines"),
+        "model-r": lambda: pipeline.run_to("model_r"),
+        "eval": lambda: pipeline.run_to("evaluation"),
     }
     explicit_actions = {
         "data": (
@@ -219,11 +280,24 @@ def _run_target(pipeline: EtaPipeline, args: argparse.Namespace) -> None:
             or getattr(args, "splits", None) is not None,
             lambda: pipeline.build_baselines(args.stacked, args.splits),
         ),
+        "model-r": (
+            getattr(args, "stacked", None) is not None
+            or getattr(args, "splits", None) is not None,
+            lambda: pipeline.build_model_r(args.stacked, args.splits),
+        ),
+        "eval": (
+            getattr(args, "model_r", None) is not None
+            or getattr(args, "baselines", None) is not None,
+            lambda: pipeline.build_evaluation(args.model_r, args.baselines),
+        ),
     }
     use_explicit_input, explicit_action = explicit_actions.get(
         args.target, (False, None)
     )
-    (explicit_action if use_explicit_input else default_actions[args.target])()
+    if use_explicit_input and explicit_action is not None:
+        explicit_action()
+    else:
+        default_actions[args.target]()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -256,6 +330,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             paths = replace(
                 paths,
                 baseline_predictions=args.out / paths.baseline_predictions.name,
+            )
+        elif args.target == "model-r" and args.out is not None:
+            paths = replace(
+                paths,
+                model_r_predictions=args.out / paths.model_r_predictions.name,
+            )
+        elif args.target == "eval" and args.out is not None:
+            paths = replace(
+                paths,
+                model_r_metrics=args.out / paths.model_r_metrics.name,
             )
 
         pipeline = EtaPipeline(settings, paths)

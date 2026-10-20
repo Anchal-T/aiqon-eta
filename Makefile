@@ -18,10 +18,10 @@ baselines:
 	$(PY) -m src.pipeline baselines
 
 train:
-	@echo "train: not implemented yet (Phase 4)"
+	$(PY) -m src.pipeline model-r
 
 eval:
-	@echo "eval: not implemented yet (Phase 5)"
+	$(PY) -m src.pipeline eval
 
 explain:
 	@echo "explain: not implemented yet (Phase 6)"

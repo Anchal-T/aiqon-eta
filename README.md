@@ -12,14 +12,15 @@ what the model expects next.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-make all       # builds raw, interim, and processed artifacts
+make all       # builds data, baselines, Model R, and comparison metrics
 make test      # runs the test suite
 ```
 
-`make all` runs data generation, features, splits, and held-out baselines
-through the central `src.pipeline` orchestrator. `make features`, `make splits`,
-and `make baselines` build their prerequisites automatically. To start from
-existing upstream artifacts, use:
+`make all` runs data generation, features, splits, held-out baselines, Model R,
+and its B2 comparison through the central `src.pipeline` orchestrator. The
+`make features`, `make splits`, `make baselines`, `make train`, and `make eval`
+targets build their prerequisites automatically. To start from existing upstream
+artifacts, use:
 
 ```bash
 .venv/bin/python -m src.pipeline data --raw PATH
@@ -27,7 +28,10 @@ existing upstream artifacts, use:
 .venv/bin/python -m src.pipeline splits --stacked PATH
 ```
 
-Model training, evaluation, and explanations remain future phases.
+Model R predicts `remaining_delay_h` with an L1 LightGBM regressor and adds it
+to `delay_so_far`. Its held-out MAE is compared with B2 by checkpoint and split
+seed. Quantile/classification models, the broader metric suite, and explanations
+remain future phases.
 
 ## The data
 
@@ -58,7 +62,9 @@ always there and the delivery is the target, so neither is ever touched.
 `make all` also writes `data/processed/baseline_predictions.csv`, with one
 held-out prediction per split seed, shipment, checkpoint, and baseline. B0
 predicts zero delay, B1 predicts the journey mean from outer-training shipments,
-and B2 predicts `delay_so_far`.
+and B2 predicts `delay_so_far`. Model R predictions and the checkpoint-level
+B2 comparison are written to `outputs/predictions/model_r.csv` and
+`outputs/metrics/model_r_vs_b2.csv`.
 
 The random draws behind the holes are made once per cell and thresholded by
 the rate, so the hidden sets nest: the cells hidden at rate 0.1 are a subset
@@ -109,10 +115,13 @@ src/checkpoints.py checkpoint visibility rules
 src/features.py   checkpoint-stacked feature and target transform
 src/splits.py     repeated shipment-level train/test and CV assignments
 src/baselines.py  held-out B0, B1, and B2 reference predictions
-tests/            data contracts, arithmetic, leakage, splits, and baseline checks
+src/models.py     Model R with grouped-fold early stopping
+src/evaluate.py   held-out Model R versus B2 MAE by checkpoint
+tests/            data contracts, arithmetic, leakage, splits, and model checks
 data/raw/         generated data
 data/interim/     observed logs, the mask, and the delay table
 data/processed/   stacked features, splits, and baseline predictions
+outputs/          Model R predictions and B2 comparison metrics
 ```
 
 ## The gap rule
