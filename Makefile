@@ -2,7 +2,7 @@ PY := .venv/bin/python
 
 .PHONY: all data features train eval explain test clean
 
-all: data
+all: features
 
 data:
 	$(PY) -m src.generate --out data/raw
@@ -10,8 +10,8 @@ data:
 	$(PY) -m src.missingness
 	$(PY) -m src.delays
 
-features:
-	@echo "features: not implemented yet (Phase 2)"
+features: data
+	$(PY) -m src.features
 
 train:
 	@echo "train: not implemented yet (Phase 4)"

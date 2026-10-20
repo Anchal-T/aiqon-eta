@@ -3,9 +3,11 @@ pandas==3.0.6
 numpy==2.5.4
 pytest==9.1.1
 
-# Phases 4-6. Installed and pinned when those phases start.
+# Phase 2: Parquet output for the stacked feature table.
+pyarrow
+
+# Phases 4-6. Installed when those phases start.
 lightgbm
 shap
 matplotlib
-pyarrow
 scikit-learn
