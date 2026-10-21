@@ -60,6 +60,7 @@ class ArtifactPaths:
     model_r_group_metrics: Path = Path("outputs/metrics/model_r_by_group.csv")
     model_q_predictions: Path = Path("outputs/predictions/model_q.csv")
     model_q_metrics: Path = Path("outputs/metrics/model_q_coverage.csv")
+    model_q_group_metrics: Path = Path("outputs/metrics/model_q_by_group.csv")
     model_c_predictions: Path = Path("outputs/predictions/model_c.csv")
     model_c_reliability: Path = Path("outputs/metrics/model_c_reliability.csv")
     model_c_reliability_plot: Path = Path("outputs/metrics/model_c_reliability.png")
@@ -67,6 +68,15 @@ class ArtifactPaths:
         "outputs/metrics/model_c_classification_metrics.csv"
     )
     model_c_threshold_sweep: Path = Path("outputs/metrics/model_c_threshold_sweep.csv")
+    model_c_reliability_by_group: Path = Path(
+        "outputs/metrics/model_c_reliability_by_group.csv"
+    )
+    model_c_classification_metrics_by_group: Path = Path(
+        "outputs/metrics/model_c_classification_metrics_by_group.csv"
+    )
+    model_c_threshold_sweep_by_group: Path = Path(
+        "outputs/metrics/model_c_threshold_sweep_by_group.csv"
+    )
 
 
 @dataclass(frozen=True)
@@ -173,21 +183,24 @@ _CLI_TARGETS = {
     ),
     "eval-q": _CliTarget(
         stage="interval_evaluation",
-        path_args=("model-q", "out"),
+        path_args=("model-q", "shipments", "truth", "hidden-mask", "out"),
         explicit_method="build_interval_evaluation",
-        explicit_inputs=("model_q",),
-        output_fields=("model_q_metrics",),
+        explicit_inputs=("model_q", "shipments", "truth", "hidden_mask"),
+        output_fields=("model_q_metrics", "model_q_group_metrics"),
     ),
     "eval-c": _CliTarget(
         stage="classification_evaluation",
-        path_args=("model-c", "out"),
+        path_args=("model-c", "shipments", "truth", "hidden-mask", "out"),
         explicit_method="build_model_c_evaluation",
-        explicit_inputs=("model_c",),
+        explicit_inputs=("model_c", "shipments", "truth", "hidden_mask"),
         output_fields=(
             "model_c_reliability",
             "model_c_reliability_plot",
             "model_c_classification_metrics",
             "model_c_threshold_sweep",
+            "model_c_reliability_by_group",
+            "model_c_classification_metrics_by_group",
+            "model_c_threshold_sweep_by_group",
         ),
     ),
 }
@@ -271,6 +284,29 @@ class EtaPipeline:
         model = model_r.ModelR(self.settings).fit(stacked, split_manifest)
         _write_artifact(model.predict_test(), self.paths.model_r_predictions)
 
+    def _load_evaluation_group_metadata(
+        self,
+        paths: tuple[Path | None, Path | None, Path | None],
+        custom_predictions: bool,
+    ) -> pd.DataFrame:
+        if custom_predictions and any(path is None for path in paths):
+            raise ConfigurationError(
+                "custom predictions require explicit --shipments, --truth, "
+                "and --hidden-mask metadata"
+            )
+        if any(path is not None for path in paths) and any(
+            path is None for path in paths
+        ):
+            raise ConfigurationError(
+                "evaluation metadata must include shipments, truth, and hidden mask"
+            )
+        shipments_path, truth_path, hidden_mask_path = paths
+        return evaluate.build_evaluation_group_metadata(
+            ingest.load(shipments_path or self.paths.raw_shipments),
+            _read_artifact(truth_path or self.paths.truth),
+            _read_artifact(hidden_mask_path or self.paths.hidden_mask),
+        )
+
     def build_evaluation(
         self,
         model_path: Path | None = None,
@@ -280,21 +316,10 @@ class EtaPipeline:
         hidden_mask_path: Path | None = None,
     ) -> None:
         """Report checkpoint and subgroup metrics for Model R vs B2."""
-        metadata_paths = (shipments_path, truth_path, hidden_mask_path)
-        if (model_path is not None or baselines_path is not None) and any(
-            path is None for path in metadata_paths
-        ):
-            raise ConfigurationError(
-                "custom Model R or baseline predictions require explicit "
-                "--shipments, --truth, and --hidden-mask metadata"
-            )
-        if any(path is not None for path in metadata_paths) and any(
-            path is None for path in metadata_paths
-        ):
-            raise ConfigurationError(
-                "evaluation metadata must include shipments, truth, and hidden mask"
-            )
-
+        metadata = self._load_evaluation_group_metadata(
+            (shipments_path, truth_path, hidden_mask_path),
+            model_path is not None or baselines_path is not None,
+        )
         model_predictions = _read_artifact(
             model_path if model_path is not None else self.paths.model_r_predictions
         )
@@ -306,21 +331,8 @@ class EtaPipeline:
         metrics = evaluate.compare_model_r_to_b2(
             model_predictions, baseline_predictions
         )
-        metadata = (
-            ingest.load(
-                shipments_path
-                if shipments_path is not None
-                else self.paths.raw_shipments
-            ),
-            _read_artifact(truth_path if truth_path is not None else self.paths.truth),
-            _read_artifact(
-                hidden_mask_path
-                if hidden_mask_path is not None
-                else self.paths.hidden_mask
-            ),
-        )
         grouped_metrics = evaluate.compare_model_r_to_b2_by_group(
-            model_predictions, baseline_predictions, *metadata
+            model_predictions, baseline_predictions, metadata
         )
         _write_artifact(metrics, self.paths.model_r_metrics)
         _write_artifact(grouped_metrics, self.paths.model_r_group_metrics)
@@ -355,28 +367,66 @@ class EtaPipeline:
         model = model_c.ModelC().fit(stacked, split_manifest)
         _write_artifact(model.predict_test(), self.paths.model_c_predictions)
 
-    def build_interval_evaluation(self, model_q_path: Path | None = None) -> None:
-        """Evaluate held-out Model Q coverage and interval width by checkpoint."""
+    def build_interval_evaluation(
+        self,
+        model_q_path: Path | None = None,
+        shipments_path: Path | None = None,
+        truth_path: Path | None = None,
+        hidden_mask_path: Path | None = None,
+    ) -> None:
+        """Evaluate held-out Model Q intervals by checkpoint and shipment cut."""
+        metadata = self._load_evaluation_group_metadata(
+            (shipments_path, truth_path, hidden_mask_path), model_q_path is not None
+        )
         predictions = _read_artifact(
             model_q_path if model_q_path is not None else self.paths.model_q_predictions
         )
         metrics = evaluate.evaluate_model_q_intervals(predictions)
+        grouped_metrics = evaluate.evaluate_model_q_intervals_by_group(
+            predictions, metadata
+        )
         _write_artifact(metrics, self.paths.model_q_metrics)
+        _write_artifact(grouped_metrics, self.paths.model_q_group_metrics)
 
-    def build_model_c_evaluation(self, model_c_path: Path | None = None) -> None:
-        """Report and plot the held-out Model C reliability curve."""
+    def build_model_c_evaluation(
+        self,
+        model_c_path: Path | None = None,
+        shipments_path: Path | None = None,
+        truth_path: Path | None = None,
+        hidden_mask_path: Path | None = None,
+    ) -> None:
+        """Report Model C metrics, reliability, and thresholds by shipment cut."""
+        metadata = self._load_evaluation_group_metadata(
+            (shipments_path, truth_path, hidden_mask_path), model_c_path is not None
+        )
         predictions = _read_artifact(
             model_c_path if model_c_path is not None else self.paths.model_c_predictions
         )
         reliability = evaluate.evaluate_model_c_reliability(predictions)
         metrics = evaluate.evaluate_model_c_classification_metrics(predictions)
         threshold_sweep = evaluate.evaluate_model_c_threshold_sweep(predictions)
+        grouped_reliability = evaluate.evaluate_model_c_reliability_by_group(
+            predictions, metadata
+        )
+        grouped_metrics = evaluate.evaluate_model_c_classification_metrics_by_group(
+            predictions, metadata
+        )
+        grouped_threshold_sweep = evaluate.evaluate_model_c_threshold_sweep_by_group(
+            predictions, metadata
+        )
         evaluate.plot_model_c_reliability(
             reliability, self.paths.model_c_reliability_plot
         )
         _write_artifact(reliability, self.paths.model_c_reliability)
         _write_artifact(metrics, self.paths.model_c_classification_metrics)
         _write_artifact(threshold_sweep, self.paths.model_c_threshold_sweep)
+        _write_artifact(grouped_reliability, self.paths.model_c_reliability_by_group)
+        _write_artifact(
+            grouped_metrics, self.paths.model_c_classification_metrics_by_group
+        )
+        _write_artifact(
+            grouped_threshold_sweep, self.paths.model_c_threshold_sweep_by_group
+        )
 
     def run_to(self, target: _PipelineStageName) -> None:
         """Run the target's prerequisites once, without unrelated branches."""

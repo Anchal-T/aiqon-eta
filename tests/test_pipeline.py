@@ -27,6 +27,7 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         model_r_group_metrics=tmp_path / "outputs" / "metrics" / "model_r_by_group.csv",
         model_q_predictions=tmp_path / "outputs" / "predictions" / "model_q.csv",
         model_q_metrics=tmp_path / "outputs" / "metrics" / "model_q_coverage.csv",
+        model_q_group_metrics=tmp_path / "outputs" / "metrics" / "model_q_by_group.csv",
         model_c_predictions=tmp_path / "outputs" / "predictions" / "model_c.csv",
         model_c_reliability=tmp_path
         / "outputs"
@@ -44,6 +45,18 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         / "outputs"
         / "metrics"
         / "model_c_threshold_sweep.csv",
+        model_c_reliability_by_group=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_c_reliability_by_group.csv",
+        model_c_classification_metrics_by_group=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_c_classification_metrics_by_group.csv",
+        model_c_threshold_sweep_by_group=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_c_threshold_sweep_by_group.csv",
     )
 
 
@@ -171,11 +184,15 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.model_r_group_metrics,
             paths.model_q_predictions,
             paths.model_q_metrics,
+            paths.model_q_group_metrics,
             paths.model_c_predictions,
             paths.model_c_reliability,
             paths.model_c_reliability_plot,
             paths.model_c_classification_metrics,
             paths.model_c_threshold_sweep,
+            paths.model_c_reliability_by_group,
+            paths.model_c_classification_metrics_by_group,
+            paths.model_c_threshold_sweep_by_group,
         )
     )
     assert (
@@ -228,6 +245,14 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     interval_metrics = pd.read_csv(paths.model_q_metrics)
     assert set(interval_metrics["checkpoint"]) == set(range(7))
     assert (interval_metrics["mean_width_h"] >= 0).all()
+    grouped_intervals = pd.read_csv(paths.model_q_group_metrics)
+    assert set(grouped_intervals["checkpoint"]) == set(range(7))
+    assert set(grouped_intervals["group_type"]) == {
+        "journey",
+        "connection_type",
+        "missed_connection",
+        "hidden_stage",
+    }
     classification = pd.read_csv(paths.model_c_predictions)
     probabilities = classification["predicted_delay_probability"]
     assert classification["actual_is_delayed"].isin((0, 1)).all()
@@ -242,6 +267,17 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     assert set(classification_metrics["checkpoint"]) == set(range(7))
     assert classification_metrics["brier_score_mean"].between(0, 1).all()
     assert classification_metrics["f1_at_0_5_mean"].between(0, 1).all()
+    grouped_classification = pd.read_csv(paths.model_c_classification_metrics_by_group)
+    assert set(grouped_classification["group_type"]) == {
+        "journey",
+        "connection_type",
+        "missed_connection",
+        "hidden_stage",
+    }
+    grouped_reliability = pd.read_csv(paths.model_c_reliability_by_group)
+    assert grouped_reliability["observed_delay_rate"].between(0, 1).all()
+    grouped_threshold_sweep = pd.read_csv(paths.model_c_threshold_sweep_by_group)
+    assert grouped_threshold_sweep["threshold"].nunique() == 21
     threshold_sweep = pd.read_csv(paths.model_c_threshold_sweep)
     assert set(threshold_sweep["checkpoint"]) == set(range(7))
     assert threshold_sweep["threshold"].nunique() == 21
@@ -249,8 +285,13 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
 
 
 def test_custom_evaluation_predictions_require_matching_metadata():
+    pipeline = EtaPipeline()
     with pytest.raises(ConfigurationError, match="explicit.*metadata"):
-        EtaPipeline().build_evaluation(model_path=Path("custom/model_r.csv"))
+        pipeline.build_evaluation(model_path=Path("custom/model_r.csv"))
+    with pytest.raises(ConfigurationError, match="explicit.*metadata"):
+        pipeline.build_interval_evaluation(model_q_path=Path("custom/model_q.csv"))
+    with pytest.raises(ConfigurationError, match="explicit.*metadata"):
+        pipeline.build_model_c_evaluation(model_c_path=Path("custom/model_c.csv"))
 
 
 def test_eval_cli_passes_explicit_predictions_and_metadata(monkeypatch):
@@ -406,18 +447,26 @@ def test_model_c_cli_starts_from_explicit_inputs(monkeypatch):
 
 def test_model_c_evaluation_cli_starts_from_explicit_predictions(monkeypatch):
     predictions = Path("existing/model_c.csv")
+    metadata_paths = (
+        Path("existing/shipments.csv"),
+        Path("existing/truth.csv"),
+        Path("existing/hidden_mask.csv"),
+    )
     output_dir = Path("custom/output")
     calls = []
     monkeypatch.setattr(
         EtaPipeline,
         "build_model_c_evaluation",
-        lambda self, model_c_path=None: calls.append(
+        lambda self, *inputs: calls.append(
             (
-                model_c_path,
+                inputs,
                 self.paths.model_c_reliability,
                 self.paths.model_c_reliability_plot,
                 self.paths.model_c_classification_metrics,
                 self.paths.model_c_threshold_sweep,
+                self.paths.model_c_reliability_by_group,
+                self.paths.model_c_classification_metrics_by_group,
+                self.paths.model_c_threshold_sweep_by_group,
             )
         ),
     )
@@ -428,15 +477,82 @@ def test_model_c_evaluation_cli_starts_from_explicit_predictions(monkeypatch):
     )
 
     assert (
-        main(["eval-c", "--model-c", str(predictions), "--out", str(output_dir)]) == 0
+        main(
+            [
+                "eval-c",
+                "--model-c",
+                str(predictions),
+                "--shipments",
+                str(metadata_paths[0]),
+                "--truth",
+                str(metadata_paths[1]),
+                "--hidden-mask",
+                str(metadata_paths[2]),
+                "--out",
+                str(output_dir),
+            ]
+        )
+        == 0
     )
     assert calls == [
         (
-            predictions,
+            (predictions, *metadata_paths),
             output_dir / "model_c_reliability.csv",
             output_dir / "model_c_reliability.png",
             output_dir / "model_c_classification_metrics.csv",
             output_dir / "model_c_threshold_sweep.csv",
+            output_dir / "model_c_reliability_by_group.csv",
+            output_dir / "model_c_classification_metrics_by_group.csv",
+            output_dir / "model_c_threshold_sweep_by_group.csv",
+        )
+    ]
+
+
+def test_model_q_evaluation_cli_passes_matching_metadata(monkeypatch):
+    inputs = (
+        Path("existing/model_q.csv"),
+        Path("existing/shipments.csv"),
+        Path("existing/truth.csv"),
+        Path("existing/hidden_mask.csv"),
+    )
+    output_dir = Path("custom/output")
+    calls = []
+    monkeypatch.setattr(
+        EtaPipeline,
+        "build_interval_evaluation",
+        lambda self, *paths: calls.append(
+            (paths, self.paths.model_q_metrics, self.paths.model_q_group_metrics)
+        ),
+    )
+    monkeypatch.setattr(
+        EtaPipeline,
+        "run_to",
+        lambda self, target: pytest.fail("explicit inputs must skip prerequisites"),
+    )
+
+    assert (
+        main(
+            [
+                "eval-q",
+                "--model-q",
+                str(inputs[0]),
+                "--shipments",
+                str(inputs[1]),
+                "--truth",
+                str(inputs[2]),
+                "--hidden-mask",
+                str(inputs[3]),
+                "--out",
+                str(output_dir),
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        (
+            inputs,
+            output_dir / "model_q_coverage.csv",
+            output_dir / "model_q_by_group.csv",
         )
     ]
 

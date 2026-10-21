@@ -178,11 +178,12 @@ def compare_model_r_to_b2(
     return _summarize_model_r_metrics(by_seed)
 
 
-def _model_r_group_metadata(
+def build_evaluation_group_metadata(
     shipments: pd.DataFrame,
     truth: pd.DataFrame,
     hidden_mask: pd.DataFrame,
 ) -> pd.DataFrame:
+    """Validate evaluation-only inputs and derive one row of cuts per shipment."""
     required_shipments = {"shipment_id", "journey_id", "hub"}
     missing_shipments = sorted(required_shipments - set(shipments.columns))
     if missing_shipments:
@@ -234,17 +235,34 @@ def _model_r_group_metadata(
     return metadata.drop(columns="hub")
 
 
-def compare_model_r_to_b2_by_group(
-    model_predictions: pd.DataFrame,
-    baseline_predictions: pd.DataFrame,
-    shipments: pd.DataFrame,
-    truth: pd.DataFrame,
-    hidden_mask: pd.DataFrame,
+def _grouped_evaluation_rows(
+    table: pd.DataFrame,
+    metadata: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Report Model R vs B2 metrics by journey and shipment subgroup."""
-    joined = _paired_model_r_b2_predictions(model_predictions, baseline_predictions)
-    metadata = _model_r_group_metadata(shipments, truth, hidden_mask)
-    joined = joined.merge(metadata, on="shipment_id", how="left", indicator=True)
+    required = (
+        "shipment_id",
+        "journey_id",
+        "connection_type",
+        "missed_connection",
+        "hidden_stage",
+    )
+    missing = sorted(set(required) - set(metadata.columns))
+    if missing:
+        raise ContractError(f"evaluation group metadata is missing columns: {missing}")
+    metadata = metadata[list(required)].copy()
+    metadata["shipment_id"] = metadata["shipment_id"].astype("string")
+    if metadata.isna().any().any() or metadata["shipment_id"].duplicated().any():
+        raise ContractError(
+            "evaluation group metadata must be complete and unique per shipment"
+        )
+
+    joined = table.merge(
+        metadata,
+        on="shipment_id",
+        how="left",
+        validate="many_to_one",
+        indicator=True,
+    )
     if not joined["_merge"].eq("both").all():
         missing_ids = sorted(
             joined.loc[joined["_merge"] != "both", "shipment_id"].unique()
@@ -254,25 +272,32 @@ def compare_model_r_to_b2_by_group(
         )
     joined = joined.drop(columns="_merge")
 
-    cuts = (
-        ("journey", "journey_id"),
-        ("connection_type", "connection_type"),
-        ("missed_connection", "missed_connection"),
-        ("hidden_stage", "hidden_stage"),
-    )
-    by_seed = pd.concat(
+    return pd.concat(
         [
-            _model_r_metrics_by_seed(
-                joined.assign(
-                    group_type=group_type,
-                    group_value=joined[column].astype("string"),
-                ),
-                ("group_type", "group_value"),
+            joined[table.columns].assign(
+                group_type=group_type,
+                group_value=joined[column].astype("string"),
             )
-            for group_type, column in cuts
+            for group_type, column in (
+                ("journey", "journey_id"),
+                ("connection_type", "connection_type"),
+                ("missed_connection", "missed_connection"),
+                ("hidden_stage", "hidden_stage"),
+            )
         ],
         ignore_index=True,
     )
+
+
+def compare_model_r_to_b2_by_group(
+    model_predictions: pd.DataFrame,
+    baseline_predictions: pd.DataFrame,
+    group_metadata: pd.DataFrame,
+) -> pd.DataFrame:
+    """Report Model R vs B2 metrics by journey and shipment subgroup."""
+    joined = _paired_model_r_b2_predictions(model_predictions, baseline_predictions)
+    grouped = _grouped_evaluation_rows(joined, group_metadata)
+    by_seed = _model_r_metrics_by_seed(grouped, ("group_type", "group_value"))
     return _summarize_model_r_metrics(by_seed, ("group_type", "group_value"))
 
 
@@ -306,11 +331,14 @@ def _validated_model_c_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
     return table
 
 
-def _model_c_metrics_by_seed(table: pd.DataFrame) -> pd.DataFrame:
+def _model_c_metrics_by_seed(
+    table: pd.DataFrame,
+    group_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
     records = []
-    for (seed, checkpoint), rows in table.groupby(
-        ["split_seed", "checkpoint"], sort=True
-    ):
+    grouping = ["split_seed", "checkpoint", *group_columns]
+    for key, rows in table.groupby(grouping, sort=True):
+        seed, checkpoint, *group_values = key
         labels = rows["actual_is_delayed"].to_numpy(dtype=int)
         probabilities = rows["predicted_delay_probability"].to_numpy(dtype=float)
         has_both_labels = np.unique(labels).size == 2
@@ -325,6 +353,7 @@ def _model_c_metrics_by_seed(table: pd.DataFrame) -> pd.DataFrame:
             {
                 "split_seed": seed,
                 "checkpoint": checkpoint,
+                **dict(zip(group_columns, group_values, strict=True)),
                 "brier_score": brier_score_loss(labels, probabilities),
                 "roc_auc": roc_auc,
                 "pr_auc": pr_auc,
@@ -338,13 +367,11 @@ def _model_c_metrics_by_seed(table: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def evaluate_model_c_classification_metrics(
-    predictions: pd.DataFrame,
+def _summarize_model_c_classification_metrics(
+    by_seed: pd.DataFrame,
+    group_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """Summarize held-out classification metrics by checkpoint across seeds."""
-    table = _validated_model_c_predictions(predictions)
-    by_seed = _model_c_metrics_by_seed(table)
-    summary = by_seed.groupby("checkpoint", as_index=False).agg(
+    return by_seed.groupby(["checkpoint", *group_columns], as_index=False).agg(
         brier_score_mean=("brier_score", "mean"),
         brier_score_std=("brier_score", "std"),
         roc_auc_mean=("roc_auc", "mean"),
@@ -356,33 +383,64 @@ def evaluate_model_c_classification_metrics(
         n_split_seeds=("split_seed", "nunique"),
         n_auc_split_seeds=("roc_auc", "count"),
     )
-    return summary
 
 
-def evaluate_model_c_threshold_sweep(predictions: pd.DataFrame) -> pd.DataFrame:
-    """Report precision, recall, and F1 over fixed thresholds by checkpoint."""
-    table = _validated_model_c_predictions(predictions)
+def evaluate_model_c_classification_metrics(
+    predictions: pd.DataFrame,
+) -> pd.DataFrame:
+    """Summarize held-out classification metrics by checkpoint across seeds."""
+    by_seed = _model_c_metrics_by_seed(_validated_model_c_predictions(predictions))
+    return _summarize_model_c_classification_metrics(by_seed)
+
+
+def evaluate_model_c_classification_metrics_by_group(
+    predictions: pd.DataFrame,
+    group_metadata: pd.DataFrame,
+) -> pd.DataFrame:
+    """Summarize held-out classification metrics by checkpoint and shipment cut."""
+    table = _grouped_evaluation_rows(
+        _validated_model_c_predictions(predictions), group_metadata
+    )
+    by_seed = _model_c_metrics_by_seed(table, ("group_type", "group_value"))
+    return _summarize_model_c_classification_metrics(
+        by_seed, ("group_type", "group_value")
+    )
+
+
+def _model_c_threshold_sweep_by_seed(
+    table: pd.DataFrame,
+    group_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
     records = []
-    for (seed, checkpoint), rows in table.groupby(
-        ["split_seed", "checkpoint"], sort=True
-    ):
+    grouping = ["split_seed", "checkpoint", *group_columns]
+    for key, rows in table.groupby(grouping, sort=True):
+        seed, checkpoint, *group_values = key
         labels = rows["actual_is_delayed"].to_numpy(dtype=int)
         probabilities = rows["predicted_delay_probability"].to_numpy(dtype=float)
+        group_values = dict(zip(group_columns, group_values, strict=True))
         for threshold in _THRESHOLD_SWEEP:
             predicted = probabilities >= threshold
             records.append(
                 {
                     "split_seed": seed,
                     "checkpoint": checkpoint,
+                    **group_values,
                     "threshold": threshold,
                     "precision": precision_score(labels, predicted, zero_division=0),
                     "recall": recall_score(labels, predicted, zero_division=0),
                     "f1": f1_score(labels, predicted, zero_division=0),
                 }
             )
+    return pd.DataFrame(records)
 
-    by_seed = pd.DataFrame(records)
-    return by_seed.groupby(["checkpoint", "threshold"], as_index=False).agg(
+
+def _summarize_model_c_threshold_sweep(
+    by_seed: pd.DataFrame,
+    group_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    return by_seed.groupby(
+        ["checkpoint", *group_columns, "threshold"], as_index=False
+    ).agg(
         precision_mean=("precision", "mean"),
         precision_std=("precision", "std"),
         recall_mean=("recall", "mean"),
@@ -393,15 +451,39 @@ def evaluate_model_c_threshold_sweep(predictions: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def evaluate_model_c_reliability(predictions: pd.DataFrame) -> pd.DataFrame:
-    """Return equal-width calibration bins for held-out Model C probabilities."""
-    table = _validated_model_c_predictions(predictions)
+def evaluate_model_c_threshold_sweep(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Report precision, recall, and F1 over fixed thresholds by checkpoint."""
+    by_seed = _model_c_threshold_sweep_by_seed(
+        _validated_model_c_predictions(predictions)
+    )
+    return _summarize_model_c_threshold_sweep(by_seed)
+
+
+def evaluate_model_c_threshold_sweep_by_group(
+    predictions: pd.DataFrame,
+    group_metadata: pd.DataFrame,
+) -> pd.DataFrame:
+    """Report threshold metrics by checkpoint and shipment cut."""
+    table = _grouped_evaluation_rows(
+        _validated_model_c_predictions(predictions), group_metadata
+    )
+    by_seed = _model_c_threshold_sweep_by_seed(table, ("group_type", "group_value"))
+    return _summarize_model_c_threshold_sweep(by_seed, ("group_type", "group_value"))
+
+
+def _model_c_reliability(
+    table: pd.DataFrame,
+    group_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
     bins = (table["predicted_delay_probability"] * _RELIABILITY_BINS).astype("int64")
+    table = table.copy()
     table["probability_bin"] = np.minimum(bins, _RELIABILITY_BINS - 1)
     table["bin_lower"] = table["probability_bin"] / _RELIABILITY_BINS
     table["bin_upper"] = (table["probability_bin"] + 1) / _RELIABILITY_BINS
 
-    curve = table.groupby(["checkpoint", "probability_bin"], as_index=False).agg(
+    curve = table.groupby(
+        ["checkpoint", *group_columns, "probability_bin"], as_index=False
+    ).agg(
         bin_lower=("bin_lower", "first"),
         bin_upper=("bin_upper", "first"),
         mean_predicted_probability=("predicted_delay_probability", "mean"),
@@ -411,6 +493,7 @@ def evaluate_model_c_reliability(predictions: pd.DataFrame) -> pd.DataFrame:
     return curve[
         [
             "checkpoint",
+            *group_columns,
             "probability_bin",
             "bin_lower",
             "bin_upper",
@@ -419,6 +502,22 @@ def evaluate_model_c_reliability(predictions: pd.DataFrame) -> pd.DataFrame:
             "n_predictions",
         ]
     ]
+
+
+def evaluate_model_c_reliability(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Return equal-width calibration bins for held-out Model C probabilities."""
+    return _model_c_reliability(_validated_model_c_predictions(predictions))
+
+
+def evaluate_model_c_reliability_by_group(
+    predictions: pd.DataFrame,
+    group_metadata: pd.DataFrame,
+) -> pd.DataFrame:
+    """Return reliability bins by checkpoint and shipment cut."""
+    table = _grouped_evaluation_rows(
+        _validated_model_c_predictions(predictions), group_metadata
+    )
+    return _model_c_reliability(table, ("group_type", "group_value"))
 
 
 def plot_model_c_reliability(reliability: pd.DataFrame, path: Path) -> None:
@@ -471,8 +570,7 @@ def plot_model_c_reliability(reliability: pd.DataFrame, path: Path) -> None:
         plt.close(figure)
 
 
-def evaluate_model_q_intervals(predictions: pd.DataFrame) -> pd.DataFrame:
-    """Report 80% interval coverage, width, and quantile crossings by checkpoint."""
+def _validated_model_q_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
     missing = sorted(set(_Q_COLUMNS) - set(predictions.columns))
     if missing:
         raise ContractError(f"Model Q predictions are missing columns: {missing}")
@@ -497,7 +595,14 @@ def evaluate_model_q_intervals(predictions: pd.DataFrame) -> pd.DataFrame:
         raise ContractError(
             "Model Q interval lower bounds must not exceed upper bounds"
         )
+    return table
 
+
+def _model_q_metrics_by_seed(
+    table: pd.DataFrame,
+    group_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    table = table.copy()
     table["covered"] = table["actual_final_delay_h"].between(
         table["predicted_final_lower_h"],
         table["predicted_final_upper_h"],
@@ -506,12 +611,20 @@ def evaluate_model_q_intervals(predictions: pd.DataFrame) -> pd.DataFrame:
     table["interval_width_h"] = (
         table["predicted_final_upper_h"] - table["predicted_final_lower_h"]
     )
-    by_seed = table.groupby(["split_seed", "checkpoint"], as_index=False).agg(
+    return table.groupby(
+        ["split_seed", "checkpoint", *group_columns], as_index=False
+    ).agg(
         coverage=("covered", "mean"),
         mean_width_h=("interval_width_h", "mean"),
         quantile_crossing_rate=("quantiles_crossed", "mean"),
     )
-    summary = by_seed.groupby("checkpoint", as_index=False).agg(
+
+
+def _summarize_model_q_metrics(
+    by_seed: pd.DataFrame,
+    group_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    summary = by_seed.groupby(["checkpoint", *group_columns], as_index=False).agg(
         coverage_mean=("coverage", "mean"),
         coverage_std=("coverage", "std"),
         mean_width_h=("mean_width_h", "mean"),
@@ -523,6 +636,7 @@ def evaluate_model_q_intervals(predictions: pd.DataFrame) -> pd.DataFrame:
     return summary[
         [
             "checkpoint",
+            *group_columns,
             "nominal_coverage",
             "coverage_mean",
             "coverage_std",
@@ -532,3 +646,21 @@ def evaluate_model_q_intervals(predictions: pd.DataFrame) -> pd.DataFrame:
             "n_split_seeds",
         ]
     ]
+
+
+def evaluate_model_q_intervals(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Report 80% interval metrics by checkpoint across split seeds."""
+    by_seed = _model_q_metrics_by_seed(_validated_model_q_predictions(predictions))
+    return _summarize_model_q_metrics(by_seed)
+
+
+def evaluate_model_q_intervals_by_group(
+    predictions: pd.DataFrame,
+    group_metadata: pd.DataFrame,
+) -> pd.DataFrame:
+    """Report 80% interval metrics by checkpoint and shipment cut."""
+    table = _grouped_evaluation_rows(
+        _validated_model_q_predictions(predictions), group_metadata
+    )
+    by_seed = _model_q_metrics_by_seed(table, ("group_type", "group_value"))
+    return _summarize_model_q_metrics(by_seed, ("group_type", "group_value"))

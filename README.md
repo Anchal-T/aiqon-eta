@@ -33,13 +33,13 @@ Model R predicts `remaining_delay_h` with an L1 LightGBM regressor and adds it
 to `delay_so_far`. Its held-out MAE, median and P90 absolute error, and RMSE
 are compared with B2 by checkpoint across split seeds and by journey,
 connection type, missed-connection truth, and hidden-stage presence. Model Q
-fits 0.1 and 0.9 quantile regressors and reports held-out interval coverage
-and width by checkpoint; crossed quantiles are ordered into interval bounds
-and flagged. Model C reports held-out Brier score, ROC-AUC, PR-AUC, F1 at 0.5,
-a threshold sweep from 0 to 1 in 0.05 steps, and a reliability curve by
-checkpoint using 10 equal-width probability bins. The probabilities are not
-post-hoc calibrated. Subgroup cuts for Models Q/C, missingness sweeps, and
-explanations remain future phases.
+fits 0.1 and 0.9 quantile regressors and reports held-out interval coverage,
+width, and quantile crossings by checkpoint and the same shipment cuts. Model
+C reports held-out Brier score, ROC-AUC, PR-AUC, F1 at 0.5, a threshold sweep
+from 0 to 1 in 0.05 steps, and a reliability curve using 10 equal-width
+probability bins, all by checkpoint and shipment cut. The probabilities are
+not post-hoc calibrated. Missingness sweeps and explanations remain future
+phases.
 
 ## The data
 
@@ -74,17 +74,19 @@ and B2 predicts `delay_so_far`. Model R predictions and its checkpoint-level
 comparison with B2 (MAE, median/P90 absolute error, and RMSE) are written to
 `outputs/predictions/model_r.csv` and `outputs/metrics/model_r_vs_b2.csv`; the
 same metrics by journey and shipment subgroup are in
-`outputs/metrics/model_r_by_group.csv`. When custom Model R or baseline
-predictions are passed to `eval`, also pass matching `--shipments`, `--truth`,
-and `--hidden-mask` files for those subgroup cuts. Model Q intervals and
-checkpoint coverage
-metrics are written to `outputs/predictions/model_q.csv` and
-`outputs/metrics/model_q_coverage.csv`. Model C's held-out delay probabilities
+`outputs/metrics/model_r_by_group.csv`. Model Q intervals and checkpoint
+coverage metrics are written to `outputs/predictions/model_q.csv` and
+`outputs/metrics/model_q_coverage.csv`; subgroup metrics are in
+`outputs/metrics/model_q_by_group.csv`. Model C's held-out delay probabilities
 are written to `outputs/predictions/model_c.csv`. Its reliability-bin table
 and plot are written to `outputs/metrics/model_c_reliability.csv` and
 `outputs/metrics/model_c_reliability.png`; classification metrics and the
 threshold sweep are in `outputs/metrics/model_c_classification_metrics.csv` and
-`outputs/metrics/model_c_threshold_sweep.csv`.
+`outputs/metrics/model_c_threshold_sweep.csv`. The grouped reliability,
+classification metrics, and threshold sweep are in the corresponding
+`*_by_group.csv` artifacts. When custom prediction files are passed to `eval`,
+`eval-q`, or `eval-c`, also pass matching `--shipments`, `--truth`, and
+`--hidden-mask` files.
 
 The random draws behind the holes are made once per cell and thresholded by
 the rate, so the hidden sets nest: the cells hidden at rate 0.1 are a subset

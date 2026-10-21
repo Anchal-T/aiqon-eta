@@ -5,13 +5,39 @@ import pytest
 
 from src.errors import ContractError
 from src.evaluate import (
+    build_evaluation_group_metadata,
     compare_model_r_to_b2,
     compare_model_r_to_b2_by_group,
     evaluate_model_c_classification_metrics,
+    evaluate_model_c_classification_metrics_by_group,
     evaluate_model_c_reliability,
+    evaluate_model_c_reliability_by_group,
     evaluate_model_c_threshold_sweep,
+    evaluate_model_c_threshold_sweep_by_group,
     evaluate_model_q_intervals,
+    evaluate_model_q_intervals_by_group,
 )
+
+
+def _group_metadata() -> pd.DataFrame:
+    shipments = pd.DataFrame(
+        [
+            ("A", "J1", None),
+            ("B", "J1", "HUB"),
+            ("C", "J2", "HUB"),
+            ("D", "J2", "HUB"),
+        ],
+        columns=("shipment_id", "journey_id", "hub"),
+    )
+    truth = pd.DataFrame(
+        [(shipment, shipment == "D") for shipment in "ABCD"],
+        columns=("shipment_id", "missed_connection"),
+    )
+    hidden_mask = pd.DataFrame(
+        [("B", "act_customs"), ("D", "act_port_done"), ("D", "act_customs")],
+        columns=("shipment_id", "column"),
+    )
+    return build_evaluation_group_metadata(shipments, truth, hidden_mask)
 
 
 def test_model_r_comparison_reports_held_out_mae_by_checkpoint():
@@ -95,26 +121,8 @@ def test_model_r_group_metrics_report_all_cuts_by_checkpoint_across_seeds():
             "predicted_final_delay_h",
         ),
     )
-    shipments = pd.DataFrame(
-        [
-            ("A", "J1", None),
-            ("B", "J1", "HUB"),
-            ("C", "J2", "HUB"),
-            ("D", "J2", "HUB"),
-        ],
-        columns=("shipment_id", "journey_id", "hub"),
-    )
-    truth = pd.DataFrame(
-        [(shipment, shipment == "D") for shipment in "ABCD"],
-        columns=("shipment_id", "missed_connection"),
-    )
-    hidden_mask = pd.DataFrame(
-        [("B", "act_customs"), ("D", "act_port_done"), ("D", "act_customs")],
-        columns=("shipment_id", "column"),
-    )
-
     metrics = compare_model_r_to_b2_by_group(
-        predictions, baseline_predictions, shipments, truth, hidden_mask
+        predictions, baseline_predictions, _group_metadata()
     )
 
     assert set(metrics["group_type"]) == {
@@ -162,16 +170,53 @@ def test_model_r_group_metrics_reject_metadata_missing_prediction_shipments():
             "predicted_final_delay_h",
         ),
     )
-    shipments = pd.DataFrame(
-        [("B", "J1", None)], columns=("shipment_id", "journey_id", "hub")
+    metadata = build_evaluation_group_metadata(
+        pd.DataFrame([("B", "J1", None)], columns=("shipment_id", "journey_id", "hub")),
+        pd.DataFrame([("B", False)], columns=("shipment_id", "missed_connection")),
+        pd.DataFrame(columns=("shipment_id", "column")),
     )
-    truth = pd.DataFrame([("B", False)], columns=("shipment_id", "missed_connection"))
-    hidden_mask = pd.DataFrame(columns=("shipment_id", "column"))
 
     with pytest.raises(ContractError, match="metadata is missing"):
-        compare_model_r_to_b2_by_group(
-            predictions, baseline_predictions, shipments, truth, hidden_mask
-        )
+        compare_model_r_to_b2_by_group(predictions, baseline_predictions, metadata)
+
+
+def test_model_q_group_metrics_report_interval_quality_by_cut():
+    predictions = pd.DataFrame(
+        [
+            (1, "A", 4, 10.0, 8.0, 12.0, False),
+            (1, "B", 4, 20.0, 22.0, 24.0, False),
+            (1, "C", 4, 30.0, 28.0, 32.0, False),
+            (1, "D", 4, 40.0, 35.0, 45.0, True),
+            (2, "A", 4, 10.0, 9.0, 11.0, False),
+            (2, "B", 4, 20.0, 19.0, 23.0, False),
+            (2, "C", 4, 30.0, 29.0, 31.0, False),
+            (2, "D", 4, 40.0, 38.0, 42.0, False),
+        ],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "actual_final_delay_h",
+            "predicted_final_lower_h",
+            "predicted_final_upper_h",
+            "quantiles_crossed",
+        ),
+    )
+
+    metrics = evaluate_model_q_intervals_by_group(predictions, _group_metadata())
+    journey = metrics.loc[
+        (metrics["group_type"] == "journey") & (metrics["group_value"] == "J1")
+    ].iloc[0]
+
+    assert journey["coverage_mean"] == pytest.approx(0.75)
+    assert journey["mean_width_h"] == pytest.approx(3.0)
+    assert journey["n_split_seeds"] == 2
+    assert set(metrics["group_type"]) == {
+        "journey",
+        "connection_type",
+        "missed_connection",
+        "hidden_stage",
+    }
 
 
 def test_model_q_interval_metrics_report_coverage_width_and_crossings():
@@ -267,6 +312,56 @@ def test_model_c_metrics_and_threshold_sweep_summarize_split_seeds():
     assert at_half["precision_mean"] == pytest.approx(1.0)
     assert at_half["recall_mean"] == pytest.approx(0.75)
     assert at_half["f1_mean"] == pytest.approx(5 / 6)
+
+
+def test_model_c_group_metrics_cover_classification_sweep_and_reliability():
+    predictions = pd.DataFrame(
+        [
+            (1, "A", 4, 0, 0.1),
+            (1, "B", 4, 1, 0.8),
+            (1, "C", 4, 1, 0.7),
+            (1, "D", 4, 0, 0.2),
+            (2, "A", 4, 0, 0.2),
+            (2, "B", 4, 1, 0.7),
+            (2, "C", 4, 1, 0.8),
+            (2, "D", 4, 0, 0.1),
+        ],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "actual_is_delayed",
+            "predicted_delay_probability",
+        ),
+    )
+    metadata = _group_metadata()
+
+    classification = evaluate_model_c_classification_metrics_by_group(
+        predictions, metadata
+    )
+    j1 = classification.loc[
+        (classification["group_type"] == "journey")
+        & (classification["group_value"] == "J1")
+    ].iloc[0]
+    threshold_sweep = evaluate_model_c_threshold_sweep_by_group(predictions, metadata)
+    j1_at_half = threshold_sweep.loc[
+        (threshold_sweep["group_type"] == "journey")
+        & (threshold_sweep["group_value"] == "J1")
+        & (threshold_sweep["threshold"] == 0.5)
+    ].iloc[0]
+    reliability = evaluate_model_c_reliability_by_group(predictions, metadata)
+
+    assert j1["brier_score_mean"] == pytest.approx(0.045)
+    assert j1["roc_auc_mean"] == pytest.approx(1.0)
+    assert j1["f1_at_0_5_mean"] == pytest.approx(1.0)
+    assert j1_at_half["precision_mean"] == pytest.approx(1.0)
+    assert j1_at_half["recall_mean"] == pytest.approx(1.0)
+    assert set(reliability["group_type"]) == {
+        "journey",
+        "connection_type",
+        "missed_connection",
+        "hidden_stage",
+    }
 
 
 def test_model_c_auc_metrics_are_missing_when_a_seed_has_one_label():
