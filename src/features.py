@@ -75,6 +75,56 @@ FEATURE_COLUMNS = (
     "port_done_missing",
     "customs_missing",
 )
+
+_BASE_ABLATION_FEATURES = (
+    "checkpoint",
+    "journey_id",
+    "origin",
+    "hub",
+    "destination",
+    "is_connecting",
+    "n_legs",
+    "planned_total_h",
+    "planned_leg1_h",
+    "planned_leg2_h",
+    "hub_buffer_h",
+    "nominal_slack_h",
+    "sched_dep_dow",
+    "sched_arrival_dow",
+    "sched_dep_doy",
+    "port_dwell_base_h",
+    "port_customs_base_h",
+    "port_base_congestion",
+    *STAGE_FEATURE_COLUMNS,
+    "delay_so_far",
+    "n_observed_stages",
+)
+_ENVIRONMENT_ABLATION_FEATURES = (
+    "weather_leg1",
+    "weather_leg2",
+    "congestion_hub",
+    "congestion_port",
+    "arrival_dow",
+)
+_LINK_ABLATION_FEATURES = (
+    "slack_remaining",
+    "slot_margin",
+    "cong_x_dwell",
+    "cong_x_customs",
+    "port_done_dow",
+    "port_done_is_weekend",
+    "port_done_missing",
+    "customs_missing",
+)
+MODEL_R_ABLATIONS = {
+    "A0": _BASE_ABLATION_FEATURES,
+    "A1": (*_BASE_ABLATION_FEATURES, *_ENVIRONMENT_ABLATION_FEATURES),
+    "A2": (
+        *_BASE_ABLATION_FEATURES,
+        *_ENVIRONMENT_ABLATION_FEATURES,
+        *_LINK_ABLATION_FEATURES,
+    ),
+}
 TARGET_COLUMNS = ("final_delay_h", "remaining_delay_h", "is_delayed")
 OUTPUT_COLUMNS = ("shipment_id", *FEATURE_COLUMNS, *TARGET_COLUMNS)
 

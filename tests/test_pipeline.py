@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -25,10 +26,15 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         model_r_predictions=tmp_path / "outputs" / "predictions" / "model_r.csv",
         model_r_metrics=tmp_path / "outputs" / "metrics" / "model_r_vs_b2.csv",
         model_r_group_metrics=tmp_path / "outputs" / "metrics" / "model_r_by_group.csv",
+        model_r_comparison_plot=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_r_vs_baselines.png",
         model_q_predictions=tmp_path / "outputs" / "predictions" / "model_q.csv",
         model_q_metrics=tmp_path / "outputs" / "metrics" / "model_q_coverage.csv",
         model_q_group_metrics=tmp_path / "outputs" / "metrics" / "model_q_by_group.csv",
         model_c_predictions=tmp_path / "outputs" / "predictions" / "model_c.csv",
+        model_c_tuning=tmp_path / "outputs" / "metrics" / "model_c_tuning.csv",
         model_c_reliability=tmp_path
         / "outputs"
         / "metrics"
@@ -89,6 +95,11 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         / "outputs"
         / "metrics"
         / "model_r_explanation_waterfall.png",
+        model_r_ablation_metrics=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_r_ablations.csv",
+        run_manifest=tmp_path / "outputs" / "run_manifest.json",
     )
 
 
@@ -174,12 +185,16 @@ def test_run_all_executes_shared_prerequisites_once(monkeypatch):
         "model_c_evaluation",
         "missingness_sweep",
         "explanations",
+        "ablations",
     ):
         monkeypatch.setattr(
             pipeline,
             f"build_{stage}",
             lambda stage=stage: calls.append(stage),
         )
+    monkeypatch.setattr(
+        pipeline, "_write_run_manifest", lambda: calls.append("run_manifest")
+    )
 
     pipeline.run_all()
 
@@ -196,6 +211,8 @@ def test_run_all_executes_shared_prerequisites_once(monkeypatch):
         "model_c_evaluation",
         "missingness_sweep",
         "explanations",
+        "ablations",
+        "run_manifest",
     ]
 
 
@@ -363,10 +380,12 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.model_r_predictions,
             paths.model_r_metrics,
             paths.model_r_group_metrics,
+            paths.model_r_comparison_plot,
             paths.model_q_predictions,
             paths.model_q_metrics,
             paths.model_q_group_metrics,
             paths.model_c_predictions,
+            paths.model_c_tuning,
             paths.model_c_reliability,
             paths.model_c_reliability_plot,
             paths.model_c_classification_metrics,
@@ -381,6 +400,8 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.model_r_shap_summary,
             paths.model_r_slack_dependence,
             paths.model_r_slot_dependence,
+            paths.model_r_ablation_metrics,
+            paths.run_manifest,
         )
     )
     assert (
@@ -406,6 +427,7 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     assert set(metrics["checkpoint"]) == set(range(7))
     assert metrics["model_rmse_mean_h"].ge(0).all()
     assert metrics["b2_p90_ae_mean_h"].ge(0).all()
+    assert paths.model_r_comparison_plot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     sweep = pd.read_csv(paths.model_r_missingness_sweep)
     assert set(sweep["missing_rate"]) == {0.0, 0.1, 0.2, 0.3}
     assert set(sweep["checkpoint"]) == set(range(7))
@@ -480,6 +502,9 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
         "missed_connection",
         "hidden_stage",
     }
+    tuning = pd.read_csv(paths.model_c_tuning)
+    assert tuning.groupby("split_seed")["selected"].sum().eq(1).all()
+    assert tuning.groupby("split_seed").size().eq(4).all()
     classification = pd.read_csv(paths.model_c_predictions)
     probabilities = classification["predicted_delay_probability"]
     assert classification["actual_is_delayed"].isin((0, 1)).all()
@@ -508,6 +533,20 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     threshold_sweep = pd.read_csv(paths.model_c_threshold_sweep)
     assert set(threshold_sweep["checkpoint"]) == set(range(7))
     assert threshold_sweep["threshold"].nunique() == 21
+    ablations = pd.read_csv(paths.model_r_ablation_metrics)
+    assert set(ablations["variant"]) == {"A0", "A1", "A2"}
+    assert set(ablations["checkpoint"]) == set(range(7))
+    manifest = json.loads(paths.run_manifest.read_text(encoding="utf-8"))
+    assert manifest["seed"] == config.DEFAULT_RUN_SETTINGS.seed
+    assert manifest["config"]["n_shipments"] == config.DEFAULT_RUN_SETTINGS.n_shipments
+    assert isinstance(manifest["git_hash"], str)
+    assert isinstance(manifest["git_dirty"], bool)
+    assert set(manifest["metrics_summary"]) == {
+        "model_r_vs_b2",
+        "model_q_intervals",
+        "model_c_classification",
+        "model_r_ablations",
+    }
     assert threshold_sweep["f1_mean"].between(0, 1).all()
 
 

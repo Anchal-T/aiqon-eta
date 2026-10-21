@@ -80,6 +80,7 @@ class _FitSpec:
     max_estimators: int
     early_stopping_rounds: int
     alpha: float | None = None
+    feature_columns: tuple[str, ...] = features.FEATURE_COLUMNS
 
 
 def _estimator_options(seed: int, n_estimators: int) -> dict[str, Any]:
@@ -157,12 +158,16 @@ def _best_iteration(
     estimator = _new_regressor(seed, spec.max_estimators, spec)
     try:
         estimator.fit(
-            fold_train.loc[:, features.FEATURE_COLUMNS],
+            fold_train.loc[:, spec.feature_columns],
             fold_train["remaining_delay_h"],
-            eval_X=fold_valid.loc[:, features.FEATURE_COLUMNS],
+            eval_X=fold_valid.loc[:, spec.feature_columns],
             eval_y=fold_valid["remaining_delay_h"],
             eval_metric=spec.eval_metric,
-            categorical_feature=list(features.CATEGORICAL_FEATURES),
+            categorical_feature=[
+                column
+                for column in features.CATEGORICAL_FEATURES
+                if column in spec.feature_columns
+            ],
             callbacks=[lgb.early_stopping(spec.early_stopping_rounds, verbose=False)],
         )
     except (ValueError, lgb.basic.LightGBMError) as error:
@@ -181,9 +186,13 @@ def _fit_final_model(
     estimator = _new_regressor(seed, n_estimators, spec)
     try:
         estimator.fit(
-            training.loc[:, features.FEATURE_COLUMNS],
+            training.loc[:, spec.feature_columns],
             training["remaining_delay_h"],
-            categorical_feature=list(features.CATEGORICAL_FEATURES),
+            categorical_feature=[
+                column
+                for column in features.CATEGORICAL_FEATURES
+                if column in spec.feature_columns
+            ],
         )
     except (ValueError, lgb.basic.LightGBMError) as error:
         raise ModelError(
@@ -222,9 +231,10 @@ def _predict_remaining(
     *,
     seed: int,
     model_name: str,
+    feature_columns: tuple[str, ...] = features.FEATURE_COLUMNS,
 ) -> np.ndarray:
     try:
-        remaining = estimator.predict(test_rows.loc[:, features.FEATURE_COLUMNS])
+        remaining = estimator.predict(test_rows.loc[:, feature_columns])
     except (ValueError, lgb.basic.LightGBMError) as error:
         raise ModelError(
             f"{model_name} prediction failed for split seed {seed}: {error}"

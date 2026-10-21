@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import subprocess
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
@@ -15,6 +17,7 @@ import pandas as pd
 import pyarrow as pa
 
 from src import (
+    ablations,
     baselines,
     config,
     delays,
@@ -44,6 +47,7 @@ _PipelineStageName = Literal[
     "classification_evaluation",
     "missingness_sweep",
     "explanations",
+    "ablations",
 ]
 
 
@@ -62,10 +66,12 @@ class ArtifactPaths:
     model_r_predictions: Path = Path("outputs/predictions/model_r.csv")
     model_r_metrics: Path = Path("outputs/metrics/model_r_vs_b2.csv")
     model_r_group_metrics: Path = Path("outputs/metrics/model_r_by_group.csv")
+    model_r_comparison_plot: Path = Path("outputs/metrics/model_r_vs_baselines.png")
     model_q_predictions: Path = Path("outputs/predictions/model_q.csv")
     model_q_metrics: Path = Path("outputs/metrics/model_q_coverage.csv")
     model_q_group_metrics: Path = Path("outputs/metrics/model_q_by_group.csv")
     model_c_predictions: Path = Path("outputs/predictions/model_c.csv")
+    model_c_tuning: Path = Path("outputs/metrics/model_c_tuning.csv")
     model_c_reliability: Path = Path("outputs/metrics/model_c_reliability.csv")
     model_c_reliability_plot: Path = Path("outputs/metrics/model_c_reliability.png")
     model_c_classification_metrics: Path = Path(
@@ -99,6 +105,8 @@ class ArtifactPaths:
     model_r_explanation_waterfall: Path = Path(
         "outputs/metrics/model_r_explanation_waterfall.png"
     )
+    model_r_ablation_metrics: Path = Path("outputs/metrics/model_r_ablations.csv")
+    run_manifest: Path = Path("outputs/run_manifest.json")
 
 
 @dataclass(frozen=True)
@@ -125,6 +133,7 @@ _PIPELINE_STAGES: dict[_PipelineStageName, _PipelineStage] = {
     ),
     "missingness_sweep": _PipelineStage("build_missingness_sweep"),
     "explanations": _PipelineStage("build_explanations", ("model_r",)),
+    "ablations": _PipelineStage("build_ablations", ("baselines", "model_r")),
 }
 
 
@@ -192,7 +201,11 @@ _CLI_TARGETS = {
             "truth",
             "hidden_mask",
         ),
-        output_fields=("model_r_metrics", "model_r_group_metrics"),
+        output_fields=(
+            "model_r_metrics",
+            "model_r_group_metrics",
+            "model_r_comparison_plot",
+        ),
     ),
     "model-q": _CliTarget(
         stage="model_q",
@@ -206,7 +219,7 @@ _CLI_TARGETS = {
         path_args=("stacked", "splits", "out"),
         explicit_method="build_model_c",
         explicit_inputs=("stacked", "splits"),
-        output_fields=("model_c_predictions",),
+        output_fields=("model_c_predictions", "model_c_tuning"),
     ),
     "eval-q": _CliTarget(
         stage="interval_evaluation",
@@ -380,6 +393,11 @@ class EtaPipeline:
         metrics = evaluate.compare_model_r_to_b2(
             model_predictions, baseline_predictions
         )
+        evaluate.plot_model_r_mae_comparison(
+            model_predictions,
+            baseline_predictions,
+            self.paths.model_r_comparison_plot,
+        )
         grouped_metrics = evaluate.compare_model_r_to_b2_by_group(
             model_predictions, baseline_predictions, metadata
         )
@@ -413,8 +431,9 @@ class EtaPipeline:
         split_manifest = _read_artifact(
             splits_path if splits_path is not None else self.paths.splits
         )
-        model = model_c.ModelC().fit(stacked, split_manifest)
+        model = model_c.ModelC(self.settings).fit(stacked, split_manifest)
         _write_artifact(model.predict_test(), self.paths.model_c_predictions)
+        _write_artifact(model.tuning_results, self.paths.model_c_tuning)
 
     def build_interval_evaluation(
         self,
@@ -495,6 +514,7 @@ class EtaPipeline:
                     model_r_predictions=root / "model_r.csv",
                     model_r_metrics=root / "model_r_metrics.csv",
                     model_r_group_metrics=root / "model_r_group_metrics.csv",
+                    model_r_comparison_plot=root / "model_r_comparison.png",
                 )
                 EtaPipeline(replace(self.settings, missing_rate=rate), paths).run_to(
                     "evaluation"
@@ -570,6 +590,17 @@ class EtaPipeline:
         for target in targets:
             build(target)
 
+    def build_ablations(self) -> None:
+        """Compare Model R's baseline, environment, and link feature sets."""
+        result = ablations.evaluate_model_r_ablations(
+            _read_artifact(self.paths.stacked),
+            _read_artifact(self.paths.splits),
+            _read_artifact(self.paths.baseline_predictions),
+            _read_artifact(self.paths.model_r_predictions),
+            self.settings,
+        )
+        _write_artifact(result, self.paths.model_r_ablation_metrics)
+
     def run_all(self) -> None:
         """Run every implemented model and evaluation branch once."""
         self._run_targets(
@@ -579,8 +610,83 @@ class EtaPipeline:
                 "classification_evaluation",
                 "missingness_sweep",
                 "explanations",
+                "ablations",
             )
         )
+        self._write_run_manifest()
+
+    def _write_run_manifest(self) -> None:
+        """Record the run settings, source revision, and headline metrics."""
+        try:
+            revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=Path(__file__).resolve().parents[1],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=Path(__file__).resolve().parents[1],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            git_hash = None
+            git_dirty = None
+        else:
+            git_hash = revision.stdout.strip() if revision.returncode == 0 else None
+            git_dirty = bool(status.stdout.strip()) if status.returncode == 0 else None
+        metrics = {
+            "model_r_vs_b2": _metric_records(
+                self.paths.model_r_metrics,
+                ("checkpoint", "model_mae_mean_h", "b2_mae_mean_h", "skill_score"),
+            ),
+            "model_q_intervals": _metric_records(
+                self.paths.model_q_metrics,
+                ("checkpoint", "coverage_mean", "mean_width_h"),
+            ),
+            "model_c_classification": _metric_records(
+                self.paths.model_c_classification_metrics,
+                (
+                    "checkpoint",
+                    "brier_score_mean",
+                    "roc_auc_mean",
+                    "pr_auc_mean",
+                    "f1_at_0_5_mean",
+                ),
+            ),
+            "model_r_ablations": _metric_records(
+                self.paths.model_r_ablation_metrics,
+                ("variant", "checkpoint", "model_mae_mean_h", "skill_score"),
+            ),
+        }
+        manifest = {
+            "seed": self.settings.seed,
+            "config": asdict(self.settings),
+            "git_hash": git_hash,
+            "git_dirty": git_dirty,
+            "metrics_summary": metrics,
+        }
+        try:
+            self.paths.run_manifest.parent.mkdir(parents=True, exist_ok=True)
+            self.paths.run_manifest.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+        except (OSError, TypeError, ValueError) as error:
+            raise ArtifactError(
+                f"cannot write run manifest {self.paths.run_manifest}: {error}"
+            ) from error
+
+
+def _metric_records(path: Path, columns: tuple[str, ...]) -> list[dict[str, object]]:
+    table = _read_artifact(path)
+    missing = sorted(set(columns) - set(table.columns))
+    if missing:
+        raise ContractError(f"metric artifact {path} is missing columns: {missing}")
+    return json.loads(table.loc[:, list(columns)].to_json(orient="records"))
 
 
 def _write_artifact(table: pd.DataFrame, path: Path) -> None:

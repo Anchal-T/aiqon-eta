@@ -16,6 +16,8 @@ from src.evaluate import (
     evaluate_model_c_threshold_sweep_by_group,
     evaluate_model_q_intervals,
     evaluate_model_q_intervals_by_group,
+    model_r_mae_by_baseline,
+    plot_model_r_mae_comparison,
     plot_model_r_missingness_sweep,
 )
 
@@ -83,8 +85,51 @@ def test_model_r_comparison_reports_held_out_mae_by_checkpoint():
     assert comparison["b2_p90_ae_mean_h"] == pytest.approx(4.25)
     assert comparison["model_rmse_mean_h"] == pytest.approx((2**0.5 + 2.5**0.5) / 2)
     assert comparison["b2_rmse_mean_h"] == pytest.approx((16**0.5 + 12.5**0.5) / 2)
+    assert comparison["skill_score"] == pytest.approx(8 / 13)
     assert comparison["model_beats_b2_seeds"] == 2
     assert comparison["n_split_seeds"] == 2
+
+
+def test_model_r_mae_comparison_covers_model_and_all_baselines(tmp_path):
+    model = pd.DataFrame(
+        [(1, "A", 2, 10.0, 12.0), (1, "B", 2, 20.0, 19.0)],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "actual_final_delay_h",
+            "predicted_final_delay_h",
+        ),
+    )
+    baselines = pd.DataFrame(
+        [
+            (1, "A", 2, "B0", 10.0),
+            (1, "B", 2, "B0", 10.0),
+            (1, "A", 2, "B1", 11.0),
+            (1, "B", 2, "B1", 19.0),
+            (1, "A", 2, "B2", 14.0),
+            (1, "B", 2, "B2", 16.0),
+        ],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "baseline",
+            "predicted_final_delay_h",
+        ),
+    )
+
+    metrics = model_r_mae_by_baseline(model, baselines)
+    plot_path = tmp_path / "model_r_comparison.png"
+    plot_model_r_mae_comparison(model, baselines, plot_path)
+
+    assert metrics.set_index("series")["mae_mean_h"].to_dict() == {
+        "Model R": 1.5,
+        "B0": 5.0,
+        "B1": 1.0,
+        "B2": 4.0,
+    }
+    assert plot_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_model_r_group_metrics_report_all_cuts_by_checkpoint_across_seeds():

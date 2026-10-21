@@ -12,13 +12,15 @@ what the model expects next.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-make all       # builds data, Models R/Q/C, evaluations, explanations, and sweep
+make all       # builds data, Models R/Q/C, evaluations, explanations, ablations, and manifest
 make test      # runs the test suite
 ```
 
 `make all` runs data generation, features, splits, held-out baselines, Models
-R/Q/C, the missingness sweep, and explanations through the central
-`src.pipeline` orchestrator. The `make features`, `make splits`, `make baselines`,
+R/Q/C, the missingness sweep, explanations, and Model R feature ablations through
+`src.pipeline`; it writes a run manifest with the seed, configuration, revision,
+and headline metrics. Model C selects parameters using grouped cross-validation.
+The `make features`, `make splits`, `make baselines`,
 `make train`, `make eval`, `make train-q`, `make train-c`, `make eval-q`,
 `make eval-c`, `make eval-missingness`, and `make explain` targets build their
 prerequisites automatically.
@@ -74,12 +76,14 @@ predicts zero delay, B1 predicts the journey mean from outer-training shipments,
 and B2 predicts `delay_so_far`. Model R predictions and its checkpoint-level
 comparison with B2 (MAE, median/P90 absolute error, and RMSE) are written to
 `outputs/predictions/model_r.csv` and `outputs/metrics/model_r_vs_b2.csv`; the
-same metrics by journey and shipment subgroup are in
+B0/B1/B2/Model R MAE-by-checkpoint plot is
+`outputs/metrics/model_r_vs_baselines.png`, and the same metrics by journey and shipment subgroup are in
 `outputs/metrics/model_r_by_group.csv`. Model Q intervals and checkpoint
 coverage metrics are written to `outputs/predictions/model_q.csv` and
 `outputs/metrics/model_q_coverage.csv`; subgroup metrics are in
 `outputs/metrics/model_q_by_group.csv`. Model C's held-out delay probabilities
-are written to `outputs/predictions/model_c.csv`. Its reliability-bin table
+are written to `outputs/predictions/model_c.csv`; grouped-CV candidate scores
+and selected parameters are in `outputs/metrics/model_c_tuning.csv`. Its reliability-bin table
 and plot are written to `outputs/metrics/model_c_reliability.csv` and
 `outputs/metrics/model_c_reliability.png`; classification metrics and the
 threshold sweep are in `outputs/metrics/model_c_classification_metrics.csv` and
@@ -97,7 +101,10 @@ checks in `outputs/metrics/model_r_explanation_recovery.csv`; grouped summary,
 `outputs/`. Request one waterfall, written to
 `outputs/metrics/model_r_explanation_waterfall.png`, with
 `.venv/bin/python -m src.pipeline explain --shipment-id S007 --split-seed 42 --checkpoint 4`.
-When custom prediction files are passed to `eval`,
+Model R ablation results for A0 (route/plan/observed delays), A1 (+ environment),
+and A2 (+ link features) are in `outputs/metrics/model_r_ablations.csv`.
+`outputs/run_manifest.json` records the run configuration, Git revision, and
+headline metric summaries. When custom prediction files are passed to `eval`,
 `eval-q`, or `eval-c`, also pass matching `--shipments`, `--truth`, and
 `--hidden-mask` files.
 

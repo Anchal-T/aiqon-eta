@@ -178,6 +178,86 @@ def compare_model_r_to_b2(
     return _summarize_model_r_metrics(by_seed)
 
 
+def _summarize_mae_series(
+    joined: pd.DataFrame, prediction_column: str, series: str
+) -> pd.DataFrame:
+    errors = (joined["actual_h"] - joined[prediction_column]).abs()
+    per_seed = (
+        joined.assign(error_h=errors)
+        .groupby(["split_seed", "checkpoint"], as_index=False)["error_h"]
+        .mean()
+    )
+    summary = (
+        per_seed.groupby("checkpoint")["error_h"]
+        .agg(["mean", "std"])
+        .reset_index()
+        .rename(columns={"mean": "mae_mean_h", "std": "mae_std_h"})
+    )
+    summary.insert(0, "series", series)
+    return summary
+
+
+def model_r_mae_by_baseline(
+    model_predictions: pd.DataFrame, baseline_predictions: pd.DataFrame
+) -> pd.DataFrame:
+    """Return per-checkpoint MAE means for Model R and B0/B1/B2."""
+    missing = sorted(set(_BASELINE_COLUMNS) - set(baseline_predictions.columns))
+    if missing:
+        raise ContractError(f"baseline predictions are missing columns: {missing}")
+    summaries = []
+    for name in ("B0", "B1", "B2"):
+        selected = baseline_predictions.loc[
+            baseline_predictions["baseline"] == name
+        ].copy()
+        if selected.empty:
+            raise ContractError(f"baseline predictions are missing {name}")
+        selected["baseline"] = "B2"
+        joined = _paired_model_r_b2_predictions(model_predictions, selected)
+        if name == "B0":
+            summaries.append(_summarize_mae_series(joined, "model_pred_h", "Model R"))
+        summaries.append(_summarize_mae_series(joined, "b2_pred_h", name))
+    return pd.concat(summaries, ignore_index=True)
+
+
+def plot_model_r_mae_comparison(
+    model_predictions: pd.DataFrame, baseline_predictions: pd.DataFrame, path: Path
+) -> None:
+    """Plot held-out Model R and baseline MAE by checkpoint."""
+    metrics = model_r_mae_by_baseline(model_predictions, baseline_predictions)
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as error:
+        raise ArtifactError(
+            "matplotlib is required to write the Model R comparison plot"
+        ) from error
+
+    figure, axis = plt.subplots(figsize=(8, 5))
+    try:
+        for name, rows in metrics.groupby("series", sort=False):
+            axis.plot(
+                rows["checkpoint"],
+                rows["mae_mean_h"],
+                marker="o",
+                label=name,
+            )
+        axis.set(
+            xlabel="Checkpoint",
+            ylabel="Mean absolute error (hours)",
+            title="Held-out MAE by checkpoint",
+        )
+        axis.grid(alpha=0.25)
+        axis.legend()
+        figure.tight_layout()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=150)
+    except OSError as error:
+        raise ArtifactError(
+            f"cannot write Model R comparison plot {path}: {error}"
+        ) from error
+    finally:
+        plt.close(figure)
+
+
 def build_evaluation_group_metadata(
     shipments: pd.DataFrame,
     truth: pd.DataFrame,

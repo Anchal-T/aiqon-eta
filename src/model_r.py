@@ -38,11 +38,22 @@ class ModelR:
         *,
         max_estimators: int = 1000,
         early_stopping_rounds: int = 50,
+        feature_columns: tuple[str, ...] = features.FEATURE_COLUMNS,
     ) -> None:
         _validate_training_options(max_estimators, early_stopping_rounds)
+        feature_columns = tuple(feature_columns)
+        if (
+            not feature_columns
+            or len(feature_columns) != len(set(feature_columns))
+            or not set(feature_columns) <= set(features.FEATURE_COLUMNS)
+        ):
+            raise ConfigurationError(
+                "feature_columns must be a unique subset of Model R features"
+            )
         self.settings = settings
         self.max_estimators = max_estimators
         self.early_stopping_rounds = early_stopping_rounds
+        self.feature_columns = feature_columns
         self._models: dict[int, lgb.LGBMRegressor] = {}
         self._test_rows: dict[int, pd.DataFrame] = {}
 
@@ -60,6 +71,7 @@ class ModelR:
                 eval_metric="l1",
                 max_estimators=self.max_estimators,
                 early_stopping_rounds=self.early_stopping_rounds,
+                feature_columns=self.feature_columns,
             ),
         )
         return self
@@ -73,7 +85,11 @@ class ModelR:
         for seed, estimator in self._models.items():
             test_rows = self._test_rows[seed]
             remaining = _predict_remaining(
-                estimator, test_rows, seed=seed, model_name="Model R"
+                estimator,
+                test_rows,
+                seed=seed,
+                model_name="Model R",
+                feature_columns=self.feature_columns,
             )
             predictions.append(
                 pd.DataFrame(
