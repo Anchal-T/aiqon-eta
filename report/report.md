@@ -1,6 +1,6 @@
 # Estimating Arrival Delay and Delay Propagation in Multi-Leg Shipments with Gradient-Boosted Models
 
-*Anchal Tandekar. Aiqon AI/SE Intern Take-Home Report. All figures are derived from the accompanying repository (README.md, LLD.md, src/, outputs/).*
+*Anchal Tandekar. Aiqon AI/SE Intern Take-Home Report.*
 
 **Abstract.** This report addresses the prediction of delivery delay for multi-leg shipments at successive points in their journey. A synthetic generator with explicit delay propagation and five planted causes produces 300 shipments, which are evaluated at seven checkpoints (C0 to C6). A LightGBM regressor (Model R) predicts remaining delay, a quantile model (Model Q) provides an 80% interval, and a classifier (Model C) estimates the probability of a delay above 6 h. Across five split seeds, Model R outperforms the strongest baseline (delay observed so far) at six of seven checkpoints, with skill scores of 0.36 to 0.41 after port arrival. Grouped TreeSHAP explanations recover most planted causes, although attribution of missed hub connections (ROC-AUC 0.742) falls short of the 0.8 target.
 
