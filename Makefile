@@ -1,6 +1,7 @@
 PY := .venv/bin/python
 
-.PHONY: all data features splits baselines train eval train-q eval-q explain test clean
+.PHONY: all data features splits baselines train eval train-q train-c eval-q \
+	explain test clean
 
 all:
 	$(PY) -m src.pipeline all
@@ -25,6 +26,9 @@ eval:
 
 train-q:
 	$(PY) -m src.pipeline model-q
+
+train-c:
+	$(PY) -m src.pipeline model-c
 
 eval-q:
 	$(PY) -m src.pipeline eval-q

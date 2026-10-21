@@ -26,6 +26,7 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         model_r_metrics=tmp_path / "outputs" / "metrics" / "model_r_vs_b2.csv",
         model_q_predictions=tmp_path / "outputs" / "predictions" / "model_q.csv",
         model_q_metrics=tmp_path / "outputs" / "metrics" / "model_q_coverage.csv",
+        model_c_predictions=tmp_path / "outputs" / "predictions" / "model_c.csv",
     )
 
 
@@ -64,6 +65,21 @@ def test_model_q_target_skips_baseline_and_point_model(monkeypatch):
     assert calls == ["data", "features", "splits", "model_q"]
 
 
+def test_model_c_target_skips_baseline_and_regression_models(monkeypatch):
+    pipeline = EtaPipeline()
+    calls = []
+    for stage in ("data", "features", "splits", "model_c"):
+        monkeypatch.setattr(
+            pipeline,
+            f"build_{stage}",
+            lambda stage=stage: calls.append(stage),
+        )
+
+    pipeline.run_to("model_c")
+
+    assert calls == ["data", "features", "splits", "model_c"]
+
+
 def test_run_all_executes_shared_prerequisites_once(monkeypatch):
     pipeline = EtaPipeline()
     calls = []
@@ -76,6 +92,7 @@ def test_run_all_executes_shared_prerequisites_once(monkeypatch):
         "evaluation",
         "model_q",
         "interval_evaluation",
+        "model_c",
     ):
         monkeypatch.setattr(
             pipeline,
@@ -94,6 +111,7 @@ def test_run_all_executes_shared_prerequisites_once(monkeypatch):
         "evaluation",
         "model_q",
         "interval_evaluation",
+        "model_c",
     ]
 
 
@@ -117,6 +135,7 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.model_r_metrics,
             paths.model_q_predictions,
             paths.model_q_metrics,
+            paths.model_c_predictions,
         )
     )
     assert (
@@ -159,6 +178,11 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     interval_metrics = pd.read_csv(paths.model_q_metrics)
     assert set(interval_metrics["checkpoint"]) == set(range(7))
     assert (interval_metrics["mean_width_h"] >= 0).all()
+    classification = pd.read_csv(paths.model_c_predictions)
+    probabilities = classification["predicted_delay_probability"]
+    assert classification["actual_is_delayed"].isin((0, 1)).all()
+    assert np.isfinite(probabilities).all()
+    assert probabilities.between(0, 1).all()
 
 
 def test_artifact_read_error_includes_path_and_cause(tmp_path):
@@ -232,6 +256,41 @@ def test_features_cli_starts_from_explicit_inputs(monkeypatch, capsys):
     assert main(["features", "--observed", str(observed), "--delays", str(delays)]) == 0
     assert calls == [(observed, delays)]
     assert "features pipeline completed" in capsys.readouterr().out
+
+
+def test_model_c_cli_starts_from_explicit_inputs(monkeypatch):
+    stacked = Path("existing/stacked.parquet")
+    split_manifest = Path("existing/splits.csv")
+    output_dir = Path("custom/output")
+    calls = []
+    monkeypatch.setattr(
+        EtaPipeline,
+        "build_model_c",
+        lambda self, stacked_path=None, splits_path=None: calls.append(
+            (stacked_path, splits_path, self.paths.model_c_predictions)
+        ),
+    )
+    monkeypatch.setattr(
+        EtaPipeline,
+        "run_to",
+        lambda self, target: pytest.fail("explicit inputs must skip prerequisites"),
+    )
+
+    assert (
+        main(
+            [
+                "model-c",
+                "--stacked",
+                str(stacked),
+                "--splits",
+                str(split_manifest),
+                "--out",
+                str(output_dir),
+            ]
+        )
+        == 0
+    )
+    assert calls == [(stacked, split_manifest, output_dir / "model_c.csv")]
 
 
 def test_splits_cli_starts_from_explicit_stacked_input(monkeypatch):

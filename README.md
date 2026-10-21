@@ -12,14 +12,15 @@ what the model expects next.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-make all       # builds data, baselines, Model R/Q, and their evaluations
+make all       # builds data, baselines, Models R/Q/C, and their evaluations
 make test      # runs the test suite
 ```
 
-`make all` runs data generation, features, splits, held-out baselines, Model R/Q,
-and their evaluations through the central `src.pipeline` orchestrator. The
+`make all` runs data generation, features, splits, held-out baselines, and
+Models R/Q/C through the central `src.pipeline` orchestrator. The
 `make features`, `make splits`, `make baselines`, `make train`, `make eval`,
-`make train-q`, and `make eval-q` targets build their prerequisites automatically.
+`make train-q`, `make train-c`, and `make eval-q` targets build their
+prerequisites automatically.
 To start from existing upstream artifacts, use:
 
 ```bash
@@ -32,8 +33,9 @@ Model R predicts `remaining_delay_h` with an L1 LightGBM regressor and adds it
 to `delay_so_far`. Its held-out MAE is compared with B2 by checkpoint and split
 seed. Model Q fits 0.1 and 0.9 quantile regressors and reports held-out interval
 coverage and width by checkpoint; crossed quantiles are ordered into interval
-bounds and flagged. Model C, broader metric cuts, missingness sweeps, and
-explanations remain future phases.
+bounds and flagged. Model C writes held-out probabilities of delay. Calibration
+reporting, broader metric cuts, missingness sweeps, and explanations remain
+future phases.
 
 ## The data
 
@@ -68,7 +70,8 @@ and B2 predicts `delay_so_far`. Model R predictions and its checkpoint-level
 B2 comparison are written to `outputs/predictions/model_r.csv` and
 `outputs/metrics/model_r_vs_b2.csv`. Model Q intervals and checkpoint coverage
 metrics are written to `outputs/predictions/model_q.csv` and
-`outputs/metrics/model_q_coverage.csv`.
+`outputs/metrics/model_q_coverage.csv`. Model C's held-out delay probabilities
+are written to `outputs/predictions/model_c.csv`.
 
 The random draws behind the holes are made once per cell and thresholded by
 the rate, so the hidden sets nest: the cells hidden at rate 0.1 are a subset
@@ -119,7 +122,10 @@ src/checkpoints.py checkpoint visibility rules
 src/features.py   checkpoint-stacked feature and target transform
 src/splits.py     repeated shipment-level train/test and CV assignments
 src/baselines.py  held-out B0, B1, and B2 reference predictions
-src/models.py     Model R and Model Q with grouped-fold early stopping
+src/model_training.py shared validation and grouped Model R/Q fitting
+src/model_r.py     Model R point regressor
+src/model_q.py     Model Q interval regressors
+src/model_c.py     Model C delay classifier
 src/evaluate.py   held-out Model R MAE and Model Q interval metrics
 tests/            data contracts, arithmetic, leakage, splits, and model checks
 data/raw/         generated data

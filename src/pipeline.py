@@ -22,7 +22,9 @@ from src import (
     generate,
     ingest,
     missingness,
-    models,
+    model_c,
+    model_q,
+    model_r,
     splits,
 )
 from src.errors import ArtifactError, ConfigurationError, PipelineError
@@ -35,6 +37,7 @@ _PipelineStageName = Literal[
     "model_r",
     "evaluation",
     "model_q",
+    "model_c",
     "interval_evaluation",
 ]
 
@@ -55,6 +58,7 @@ class ArtifactPaths:
     model_r_metrics: Path = Path("outputs/metrics/model_r_vs_b2.csv")
     model_q_predictions: Path = Path("outputs/predictions/model_q.csv")
     model_q_metrics: Path = Path("outputs/metrics/model_q_coverage.csv")
+    model_c_predictions: Path = Path("outputs/predictions/model_c.csv")
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,7 @@ _PIPELINE_STAGES: dict[_PipelineStageName, _PipelineStage] = {
     "model_r": _PipelineStage("build_model_r", ("splits",)),
     "evaluation": _PipelineStage("build_evaluation", ("baselines", "model_r")),
     "model_q": _PipelineStage("build_model_q", ("splits",)),
+    "model_c": _PipelineStage("build_model_c", ("splits",)),
     "interval_evaluation": _PipelineStage("build_interval_evaluation", ("model_q",)),
 }
 
@@ -134,6 +139,13 @@ _CLI_TARGETS = {
         explicit_method="build_model_q",
         explicit_inputs=("stacked", "splits"),
         output_fields=("model_q_predictions",),
+    ),
+    "model-c": _CliTarget(
+        stage="model_c",
+        path_args=("stacked", "splits", "out"),
+        explicit_method="build_model_c",
+        explicit_inputs=("stacked", "splits"),
+        output_fields=("model_c_predictions",),
     ),
     "eval-q": _CliTarget(
         stage="interval_evaluation",
@@ -220,7 +232,7 @@ class EtaPipeline:
         split_manifest = _read_artifact(
             splits_path if splits_path is not None else self.paths.splits
         )
-        model = models.ModelR(self.settings).fit(stacked, split_manifest)
+        model = model_r.ModelR(self.settings).fit(stacked, split_manifest)
         _write_artifact(model.predict_test(), self.paths.model_r_predictions)
 
     def build_evaluation(
@@ -254,8 +266,23 @@ class EtaPipeline:
         split_manifest = _read_artifact(
             splits_path if splits_path is not None else self.paths.splits
         )
-        model = models.ModelQ(self.settings).fit(stacked, split_manifest)
+        model = model_q.ModelQ(self.settings).fit(stacked, split_manifest)
         _write_artifact(model.predict_test(), self.paths.model_q_predictions)
+
+    def build_model_c(
+        self,
+        stacked_path: Path | None = None,
+        splits_path: Path | None = None,
+    ) -> None:
+        """Fit Model C and write its outer-test delay probabilities."""
+        stacked = _read_artifact(
+            stacked_path if stacked_path is not None else self.paths.stacked
+        )
+        split_manifest = _read_artifact(
+            splits_path if splits_path is not None else self.paths.splits
+        )
+        model = model_c.ModelC().fit(stacked, split_manifest)
+        _write_artifact(model.predict_test(), self.paths.model_c_predictions)
 
     def build_interval_evaluation(self, model_q_path: Path | None = None) -> None:
         """Evaluate held-out Model Q coverage and interval width by checkpoint."""
@@ -288,7 +315,7 @@ class EtaPipeline:
 
     def run_all(self) -> None:
         """Run every implemented model and evaluation branch once."""
-        self._run_targets(("evaluation", "interval_evaluation"))
+        self._run_targets(("evaluation", "interval_evaluation", "model_c"))
 
 
 def _write_artifact(table: pd.DataFrame, path: Path) -> None:
