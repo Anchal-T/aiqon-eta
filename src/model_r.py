@@ -7,7 +7,7 @@ from collections.abc import Mapping
 import lightgbm as lgb
 import pandas as pd
 
-from src import config
+from src import config, features
 from src.errors import ConfigurationError
 from src.model_training import (
     _fit_grouped_models,
@@ -99,3 +99,13 @@ class ModelR:
     def fitted_models(self) -> Mapping[int, lgb.LGBMRegressor]:
         """Fitted final estimators, keyed by outer split seed."""
         return dict(self._models)
+
+    @property
+    def held_out_features(self) -> Mapping[int, pd.DataFrame]:
+        """Held-out feature rows keyed by split seed, without target values."""
+        if not self._models:
+            raise ConfigurationError("Model R must be fit before explaining")
+        return {
+            seed: rows.loc[:, ["shipment_id", *features.FEATURE_COLUMNS]].copy()
+            for seed, rows in self._test_rows.items()
+        }

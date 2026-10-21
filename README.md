@@ -12,16 +12,16 @@ what the model expects next.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-make all       # builds data, Models R/Q/C, evaluations, and missingness sweep
+make all       # builds data, Models R/Q/C, evaluations, explanations, and sweep
 make test      # runs the test suite
 ```
 
 `make all` runs data generation, features, splits, held-out baselines, Models
-R/Q/C, and the missingness sweep through the central `src.pipeline`
-orchestrator. The `make features`, `make splits`, `make baselines`, `make train`,
-`make eval`, `make train-q`, `make train-c`, `make eval-q`, `make eval-c`, and
-`make eval-missingness` targets build
-their prerequisites automatically.
+R/Q/C, the missingness sweep, and explanations through the central
+`src.pipeline` orchestrator. The `make features`, `make splits`, `make baselines`,
+`make train`, `make eval`, `make train-q`, `make train-c`, `make eval-q`,
+`make eval-c`, `make eval-missingness`, and `make explain` targets build their
+prerequisites automatically.
 To start from existing upstream artifacts, use:
 
 ```bash
@@ -40,7 +40,7 @@ C reports held-out Brier score, ROC-AUC, PR-AUC, F1 at 0.5, a threshold sweep
 from 0 to 1 in 0.05 steps, and a reliability curve using 10 equal-width
 probability bins, all by checkpoint and shipment cut. The probabilities are
 not post-hoc calibrated. The missingness sweep is available separately through
-`make eval-missingness`; explanations remain a future phase.
+`make eval-missingness`; explanations are available through `make explain`.
 
 ## The data
 
@@ -90,6 +90,13 @@ R MAE means and spread (plus B2 metrics) to
 `outputs/metrics/model_r_missingness_sweep.csv` and plots Model R MAE against
 missing rate in `outputs/metrics/model_r_missingness_sweep.png`. It evaluates
 rates 0, 0.1, 0.2, and 0.3 using the same generated seed and split seeds.
+Model R explanations use grouped TreeSHAP contributions and observed-stage facts.
+They are written to `outputs/predictions/model_r_explanations.csv`, with truth
+checks in `outputs/metrics/model_r_explanation_recovery.csv`; grouped summary,
+`slack_remaining` and `slot_margin` dependence plots are written under
+`outputs/`. Request one waterfall, written to
+`outputs/metrics/model_r_explanation_waterfall.png`, with
+`.venv/bin/python -m src.pipeline explain --shipment-id S007 --split-seed 42 --checkpoint 4`.
 When custom prediction files are passed to `eval`,
 `eval-q`, or `eval-c`, also pass matching `--shipments`, `--truth`, and
 `--hidden-mask` files.

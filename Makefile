@@ -40,7 +40,7 @@ eval-missingness:
 	$(PY) -m src.pipeline eval-missingness
 
 explain:
-	@echo "explain: not implemented yet (Phase 6)"
+	$(PY) -m src.pipeline explain
 
 test:
 	$(PY) -m pytest -q

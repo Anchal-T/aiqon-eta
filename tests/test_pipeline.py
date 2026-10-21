@@ -65,6 +65,30 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         / "outputs"
         / "metrics"
         / "model_r_missingness_sweep.png",
+        model_r_explanations=tmp_path
+        / "outputs"
+        / "predictions"
+        / "model_r_explanations.csv",
+        model_r_explanation_recovery=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_r_explanation_recovery.csv",
+        model_r_shap_summary=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_r_shap_summary.png",
+        model_r_slack_dependence=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_r_slack_dependence.png",
+        model_r_slot_dependence=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_r_slot_dependence.png",
+        model_r_explanation_waterfall=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_r_explanation_waterfall.png",
     )
 
 
@@ -149,6 +173,7 @@ def test_run_all_executes_shared_prerequisites_once(monkeypatch):
         "model_c",
         "model_c_evaluation",
         "missingness_sweep",
+        "explanations",
     ):
         monkeypatch.setattr(
             pipeline,
@@ -170,7 +195,20 @@ def test_run_all_executes_shared_prerequisites_once(monkeypatch):
         "model_c",
         "model_c_evaluation",
         "missingness_sweep",
+        "explanations",
     ]
+
+
+def test_explanations_target_builds_model_r_once(monkeypatch):
+    pipeline = EtaPipeline()
+    calls = []
+    for stage in ("data", "features", "splits", "model_r", "explanations"):
+        method = "build_explanations" if stage == "explanations" else f"build_{stage}"
+        monkeypatch.setattr(pipeline, method, lambda stage=stage: calls.append(stage))
+
+    pipeline.run_to("explanations")
+
+    assert calls == ["data", "features", "splits", "model_r", "explanations"]
 
 
 def test_missingness_sweep_runs_fixed_rates_with_same_seeds_and_writes_outputs(
@@ -249,10 +287,67 @@ def test_missingness_sweep_cli_rejects_rate_override(capsys):
     assert "fixed" in capsys.readouterr().err
 
 
+def test_explain_cli_builds_artifacts_and_selected_waterfall(monkeypatch):
+    output_dir = Path("custom/output")
+    calls = []
+    monkeypatch.setattr(
+        EtaPipeline,
+        "run_to",
+        lambda self, target: calls.append(("run", target)),
+    )
+    monkeypatch.setattr(
+        EtaPipeline,
+        "write_model_r_waterfall",
+        lambda self, shipment_id, split_seed, checkpoint: calls.append(
+            (
+                "waterfall",
+                shipment_id,
+                split_seed,
+                checkpoint,
+                self.paths.model_r_explanation_waterfall,
+            )
+        ),
+    )
+
+    assert (
+        main(
+            [
+                "explain",
+                "--shipment-id",
+                "S000",
+                "--split-seed",
+                "42",
+                "--checkpoint",
+                "4",
+                "--out",
+                str(output_dir),
+            ]
+        )
+        == 0
+    )
+
+    assert calls == [
+        ("run", "explanations"),
+        (
+            "waterfall",
+            "S000",
+            42,
+            4,
+            output_dir / "model_r_explanation_waterfall.png",
+        ),
+    ]
+
+
+def test_explain_cli_requires_all_waterfall_keys(capsys):
+    assert main(["explain", "--shipment-id", "S000"]) == 1
+    assert "provided together" in capsys.readouterr().err
+
+
 def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     paths = _temporary_paths(tmp_path)
 
-    EtaPipeline(paths=paths).run_all()
+    pipeline = EtaPipeline(paths=paths)
+    pipeline.run_all()
 
     assert all(
         path.is_file()
@@ -281,6 +376,11 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.model_c_threshold_sweep_by_group,
             paths.model_r_missingness_sweep,
             paths.model_r_missingness_sweep_plot,
+            paths.model_r_explanations,
+            paths.model_r_explanation_recovery,
+            paths.model_r_shap_summary,
+            paths.model_r_slack_dependence,
+            paths.model_r_slot_dependence,
         )
     )
     assert (
@@ -313,6 +413,38 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     assert paths.model_r_missingness_sweep_plot.read_bytes().startswith(
         b"\x89PNG\r\n\x1a\n"
     )
+    explanations = pd.read_csv(paths.model_r_explanations)
+    selected = explanations.iloc[0]
+    pipeline.write_model_r_waterfall(
+        str(selected["shipment_id"]),
+        int(selected["split_seed"]),
+        int(selected["checkpoint"]),
+    )
+    assert paths.model_r_explanation_waterfall.read_bytes().startswith(
+        b"\x89PNG\r\n\x1a\n"
+    )
+    shap_columns = [
+        column for column in explanations if column.startswith("shap_group_")
+    ]
+    np.testing.assert_allclose(
+        explanations["base_value"] + explanations[shap_columns].sum(axis=1),
+        explanations["predicted_remaining_delay_h"],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    recovery = pd.read_csv(paths.model_r_explanation_recovery)
+    assert set(recovery["check"]) == {
+        "cliff_recovery_c2",
+        "slot_recovery_c4",
+        "storm_leg1_fact_top",
+        "storm_leg2_fact_top",
+    }
+    for plot_path in (
+        paths.model_r_shap_summary,
+        paths.model_r_slack_dependence,
+        paths.model_r_slot_dependence,
+    ):
+        assert plot_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     grouped_metrics = pd.read_csv(paths.model_r_group_metrics)
     assert set(grouped_metrics["checkpoint"]) == set(range(7))
     assert set(grouped_metrics["group_type"]) == {

@@ -19,6 +19,7 @@ from src import (
     config,
     delays,
     evaluate,
+    explain,
     features,
     generate,
     ingest,
@@ -28,7 +29,7 @@ from src import (
     model_r,
     splits,
 )
-from src.errors import ArtifactError, ConfigurationError, PipelineError
+from src.errors import ArtifactError, ConfigurationError, ContractError, PipelineError
 
 _PipelineStageName = Literal[
     "data",
@@ -42,6 +43,7 @@ _PipelineStageName = Literal[
     "interval_evaluation",
     "classification_evaluation",
     "missingness_sweep",
+    "explanations",
 ]
 
 
@@ -85,6 +87,18 @@ class ArtifactPaths:
     model_r_missingness_sweep_plot: Path = Path(
         "outputs/metrics/model_r_missingness_sweep.png"
     )
+    model_r_explanations: Path = Path("outputs/predictions/model_r_explanations.csv")
+    model_r_explanation_recovery: Path = Path(
+        "outputs/metrics/model_r_explanation_recovery.csv"
+    )
+    model_r_shap_summary: Path = Path("outputs/metrics/model_r_shap_summary.png")
+    model_r_slack_dependence: Path = Path(
+        "outputs/metrics/model_r_slack_dependence.png"
+    )
+    model_r_slot_dependence: Path = Path("outputs/metrics/model_r_slot_dependence.png")
+    model_r_explanation_waterfall: Path = Path(
+        "outputs/metrics/model_r_explanation_waterfall.png"
+    )
 
 
 @dataclass(frozen=True)
@@ -110,6 +124,7 @@ _PIPELINE_STAGES: dict[_PipelineStageName, _PipelineStage] = {
         "build_model_c_evaluation", ("model_c",)
     ),
     "missingness_sweep": _PipelineStage("build_missingness_sweep"),
+    "explanations": _PipelineStage("build_explanations", ("model_r",)),
 }
 
 
@@ -223,6 +238,18 @@ _CLI_TARGETS = {
             "model_r_missingness_sweep_plot",
         ),
     ),
+    "explain": _CliTarget(
+        stage="explanations",
+        path_args=("out",),
+        output_fields=(
+            "model_r_explanations",
+            "model_r_explanation_recovery",
+            "model_r_shap_summary",
+            "model_r_slack_dependence",
+            "model_r_slot_dependence",
+            "model_r_explanation_waterfall",
+        ),
+    ),
 }
 
 
@@ -236,6 +263,7 @@ class EtaPipeline:
     ) -> None:
         self.settings = settings
         self.paths = paths if paths is not None else ArtifactPaths()
+        self._model_r_model: model_r.ModelR | None = None
 
     def build_data(self, raw_path: Path | None = None) -> None:
         """Generate or load raw data, then simulate missingness and delays."""
@@ -303,6 +331,7 @@ class EtaPipeline:
         )
         model = model_r.ModelR(self.settings).fit(stacked, split_manifest)
         _write_artifact(model.predict_test(), self.paths.model_r_predictions)
+        self._model_r_model = model
 
     def _load_evaluation_group_metadata(
         self,
@@ -480,6 +509,46 @@ class EtaPipeline:
         )
         _write_artifact(metrics, self.paths.model_r_missingness_sweep)
 
+    def build_explanations(self) -> None:
+        """Write held-out Model R facts, grouped SHAP, and recovery checks."""
+        if self._model_r_model is None:
+            raise ConfigurationError("Model R must be fit before explaining")
+        explanations, recovery = explain.build_model_r_explanations(
+            self._model_r_model,
+            _read_artifact(self.paths.delays),
+            _read_artifact(self.paths.truth),
+        )
+        explain.plot_model_r_shap_summary(explanations, self.paths.model_r_shap_summary)
+        explain.plot_model_r_dependence(
+            explanations, "slack_remaining", self.paths.model_r_slack_dependence
+        )
+        explain.plot_model_r_dependence(
+            explanations, "slot_margin", self.paths.model_r_slot_dependence
+        )
+        _write_artifact(explanations, self.paths.model_r_explanations)
+        _write_artifact(recovery, self.paths.model_r_explanation_recovery)
+
+    def write_model_r_waterfall(
+        self, shipment_id: str, split_seed: int, checkpoint: int
+    ) -> None:
+        """Write one requested held-out prediction's fact/SHAP waterfall."""
+        table = _read_artifact(self.paths.model_r_explanations)
+        selected = table.loc[
+            (table["shipment_id"].astype("string") == shipment_id)
+            & pd.to_numeric(table["split_seed"], errors="coerce").eq(split_seed)
+            & pd.to_numeric(table["checkpoint"], errors="coerce").eq(checkpoint)
+        ]
+        if selected.empty:
+            raise ConfigurationError(
+                f"no held-out explanation for {shipment_id}, split {split_seed}, "
+                f"checkpoint C{checkpoint}"
+            )
+        if len(selected) != 1:
+            raise ContractError("held-out explanation keys must be unique")
+        explain.plot_model_r_waterfall(
+            selected.iloc[0], self.paths.model_r_explanation_waterfall
+        )
+
     def run_to(self, target: _PipelineStageName) -> None:
         """Run the target's prerequisites once, without unrelated branches."""
         self._run_targets((target,))
@@ -509,6 +578,7 @@ class EtaPipeline:
                 "interval_evaluation",
                 "classification_evaluation",
                 "missingness_sweep",
+                "explanations",
             )
         )
 
@@ -563,6 +633,10 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--rate", type=float)
         for argument in spec.path_args:
             command.add_argument(f"--{argument}", type=Path)
+        if target == "explain":
+            command.add_argument("--shipment-id")
+            command.add_argument("--split-seed", type=int)
+            command.add_argument("--checkpoint", type=int)
 
     return parser
 
@@ -578,6 +652,10 @@ def _run_target(pipeline: EtaPipeline, args: argparse.Namespace) -> None:
         getattr(pipeline, spec.explicit_method)(*inputs)
     else:
         pipeline.run_to(spec.stage)
+        if args.target == "explain" and args.shipment_id is not None:
+            pipeline.write_model_r_waterfall(
+                args.shipment_id, args.split_seed, args.checkpoint
+            )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -589,6 +667,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "eval-missingness uses fixed rates 0, 0.1, 0.2, and 0.3; "
                 "--rate is not supported"
             )
+        if args.target == "explain":
+            selection = (args.shipment_id, args.split_seed, args.checkpoint)
+            if any(value is not None for value in selection) and any(
+                value is None for value in selection
+            ):
+                raise ConfigurationError(
+                    "--shipment-id, --split-seed, and --checkpoint must be provided together"
+                )
         settings_updates = {
             key: value
             for key, value in (
