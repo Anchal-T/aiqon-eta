@@ -112,15 +112,20 @@ def _paired_model_r_b2_predictions(
         if values.isna().any() or not np.isfinite(values).all():
             raise ContractError(f"prediction column {column} must be finite numbers")
         joined[column] = values
-    return joined
+    return joined.drop(columns="_merge")
 
 
-def _model_r_metrics_by_seed(joined: pd.DataFrame) -> pd.DataFrame:
+def _model_r_metrics_by_seed(
+    joined: pd.DataFrame,
+    group_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
     joined["model_error_h"] = (joined["actual_h"] - joined["model_pred_h"]).abs()
     joined["b2_error_h"] = (joined["actual_h"] - joined["b2_pred_h"]).abs()
     joined["model_squared_error_h"] = (joined["actual_h"] - joined["model_pred_h"]) ** 2
     joined["b2_squared_error_h"] = (joined["actual_h"] - joined["b2_pred_h"]) ** 2
-    by_seed = joined.groupby(["split_seed", "checkpoint"], as_index=False).agg(
+    by_seed = joined.groupby(
+        ["split_seed", "checkpoint", *group_columns], as_index=False
+    ).agg(
         model_mae_h=("model_error_h", "mean"),
         model_median_ae_h=("model_error_h", "median"),
         model_p90_ae_h=("model_error_h", lambda errors: errors.quantile(0.9)),
@@ -135,6 +140,33 @@ def _model_r_metrics_by_seed(joined: pd.DataFrame) -> pd.DataFrame:
     return by_seed
 
 
+def _summarize_model_r_metrics(
+    by_seed: pd.DataFrame,
+    group_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    by_seed = by_seed.copy()
+    by_seed["model_beats_b2"] = by_seed["model_mae_h"] < by_seed["b2_mae_h"]
+    aggregations = {}
+    for model in ("model", "b2"):
+        for metric in ("mae", "median_ae", "p90_ae", "rmse"):
+            source = f"{model}_{metric}_h"
+            aggregations[f"{model}_{metric}_mean_h"] = (source, "mean")
+            aggregations[f"{model}_{metric}_std_h"] = (source, "std")
+    aggregations.update(
+        model_beats_b2_seeds=("model_beats_b2", "sum"),
+        n_split_seeds=("split_seed", "nunique"),
+    )
+    summary = by_seed.groupby(["checkpoint", *group_columns], as_index=False).agg(
+        **aggregations
+    )
+    summary["skill_score"] = np.where(
+        summary["b2_mae_mean_h"] > 0,
+        1.0 - summary["model_mae_mean_h"] / summary["b2_mae_mean_h"],
+        np.nan,
+    )
+    return summary
+
+
 def compare_model_r_to_b2(
     model_predictions: pd.DataFrame,
     baseline_predictions: pd.DataFrame,
@@ -143,33 +175,105 @@ def compare_model_r_to_b2(
     by_seed = _model_r_metrics_by_seed(
         _paired_model_r_b2_predictions(model_predictions, baseline_predictions)
     )
-    by_seed["model_beats_b2"] = by_seed["model_mae_h"] < by_seed["b2_mae_h"]
-    summary = by_seed.groupby("checkpoint", as_index=False).agg(
-        model_mae_mean_h=("model_mae_h", "mean"),
-        model_mae_std_h=("model_mae_h", "std"),
-        model_median_ae_mean_h=("model_median_ae_h", "mean"),
-        model_median_ae_std_h=("model_median_ae_h", "std"),
-        model_p90_ae_mean_h=("model_p90_ae_h", "mean"),
-        model_p90_ae_std_h=("model_p90_ae_h", "std"),
-        model_rmse_mean_h=("model_rmse_h", "mean"),
-        model_rmse_std_h=("model_rmse_h", "std"),
-        b2_mae_mean_h=("b2_mae_h", "mean"),
-        b2_mae_std_h=("b2_mae_h", "std"),
-        b2_median_ae_mean_h=("b2_median_ae_h", "mean"),
-        b2_median_ae_std_h=("b2_median_ae_h", "std"),
-        b2_p90_ae_mean_h=("b2_p90_ae_h", "mean"),
-        b2_p90_ae_std_h=("b2_p90_ae_h", "std"),
-        b2_rmse_mean_h=("b2_rmse_h", "mean"),
-        b2_rmse_std_h=("b2_rmse_h", "std"),
-        model_beats_b2_seeds=("model_beats_b2", "sum"),
-        n_split_seeds=("split_seed", "nunique"),
+    return _summarize_model_r_metrics(by_seed)
+
+
+def _model_r_group_metadata(
+    shipments: pd.DataFrame,
+    truth: pd.DataFrame,
+    hidden_mask: pd.DataFrame,
+) -> pd.DataFrame:
+    required_shipments = {"shipment_id", "journey_id", "hub"}
+    missing_shipments = sorted(required_shipments - set(shipments.columns))
+    if missing_shipments:
+        raise ContractError(
+            f"shipment metadata is missing columns: {missing_shipments}"
+        )
+    if {"shipment_id", "missed_connection"} - set(truth.columns):
+        raise ContractError("truth metadata requires shipment_id and missed_connection")
+    if "shipment_id" not in hidden_mask.columns:
+        raise ContractError("hidden-stage metadata is missing shipment_id")
+
+    metadata = shipments[["shipment_id", "journey_id", "hub"]].copy()
+    metadata["shipment_id"] = metadata["shipment_id"].astype("string")
+    if metadata[["shipment_id", "journey_id"]].isna().any().any():
+        raise ContractError("shipment metadata requires shipment IDs and journey IDs")
+    if metadata["shipment_id"].duplicated().any():
+        raise ContractError("shipment metadata IDs must be unique")
+    metadata["journey_id"] = metadata["journey_id"].astype("string")
+
+    missed = truth[["shipment_id", "missed_connection"]].copy()
+    missed["shipment_id"] = missed["shipment_id"].astype("string")
+    if missed.isna().any().any() or missed["shipment_id"].duplicated().any():
+        raise ContractError(
+            "truth metadata IDs and missed_connection values must be unique and present"
+        )
+    if not missed["missed_connection"].isin([True, False]).all():
+        raise ContractError("missed_connection truth values must be boolean")
+    missed["missed_connection"] = missed["missed_connection"].astype(bool)
+
+    shipment_ids = set(metadata["shipment_id"])
+    if set(missed["shipment_id"]) != shipment_ids:
+        raise ContractError("shipment and truth metadata IDs do not match")
+    hidden_ids = hidden_mask["shipment_id"].astype("string")
+    if hidden_ids.isna().any() or not set(hidden_ids).issubset(shipment_ids):
+        raise ContractError("hidden-stage metadata contains an unknown shipment ID")
+
+    metadata = metadata.merge(missed, on="shipment_id", validate="one_to_one")
+    metadata["connection_type"] = np.where(
+        metadata["hub"].notna(), "connecting", "direct"
     )
-    summary["skill_score"] = np.where(
-        summary["b2_mae_mean_h"] > 0,
-        1.0 - summary["model_mae_mean_h"] / summary["b2_mae_mean_h"],
-        np.nan,
+    metadata["missed_connection"] = np.where(
+        metadata["missed_connection"], "true", "false"
     )
-    return summary
+    metadata["hidden_stage"] = np.where(
+        metadata["shipment_id"].isin(hidden_ids),
+        "with_hidden_stage",
+        "without_hidden_stage",
+    )
+    return metadata.drop(columns="hub")
+
+
+def compare_model_r_to_b2_by_group(
+    model_predictions: pd.DataFrame,
+    baseline_predictions: pd.DataFrame,
+    shipments: pd.DataFrame,
+    truth: pd.DataFrame,
+    hidden_mask: pd.DataFrame,
+) -> pd.DataFrame:
+    """Report Model R vs B2 metrics by journey and shipment subgroup."""
+    joined = _paired_model_r_b2_predictions(model_predictions, baseline_predictions)
+    metadata = _model_r_group_metadata(shipments, truth, hidden_mask)
+    joined = joined.merge(metadata, on="shipment_id", how="left", indicator=True)
+    if not joined["_merge"].eq("both").all():
+        missing_ids = sorted(
+            joined.loc[joined["_merge"] != "both", "shipment_id"].unique()
+        )
+        raise ContractError(
+            f"evaluation metadata is missing for predicted shipments: {missing_ids[:5]}"
+        )
+    joined = joined.drop(columns="_merge")
+
+    cuts = (
+        ("journey", "journey_id"),
+        ("connection_type", "connection_type"),
+        ("missed_connection", "missed_connection"),
+        ("hidden_stage", "hidden_stage"),
+    )
+    by_seed = pd.concat(
+        [
+            _model_r_metrics_by_seed(
+                joined.assign(
+                    group_type=group_type,
+                    group_value=joined[column].astype("string"),
+                ),
+                ("group_type", "group_value"),
+            )
+            for group_type, column in cuts
+        ],
+        ignore_index=True,
+    )
+    return _summarize_model_r_metrics(by_seed, ("group_type", "group_value"))
 
 
 def _validated_model_c_predictions(predictions: pd.DataFrame) -> pd.DataFrame:

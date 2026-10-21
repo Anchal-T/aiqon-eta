@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from src import config, generate
-from src.errors import ArtifactError
+from src.errors import ArtifactError, ConfigurationError
 from src.pipeline import ArtifactPaths, EtaPipeline, main
 
 
@@ -24,6 +24,7 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         baseline_predictions=tmp_path / "processed" / "baseline_predictions.csv",
         model_r_predictions=tmp_path / "outputs" / "predictions" / "model_r.csv",
         model_r_metrics=tmp_path / "outputs" / "metrics" / "model_r_vs_b2.csv",
+        model_r_group_metrics=tmp_path / "outputs" / "metrics" / "model_r_by_group.csv",
         model_q_predictions=tmp_path / "outputs" / "predictions" / "model_q.csv",
         model_q_metrics=tmp_path / "outputs" / "metrics" / "model_q_coverage.csv",
         model_c_predictions=tmp_path / "outputs" / "predictions" / "model_c.csv",
@@ -167,6 +168,7 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.baseline_predictions,
             paths.model_r_predictions,
             paths.model_r_metrics,
+            paths.model_r_group_metrics,
             paths.model_q_predictions,
             paths.model_q_metrics,
             paths.model_c_predictions,
@@ -199,6 +201,14 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     assert set(metrics["checkpoint"]) == set(range(7))
     assert metrics["model_rmse_mean_h"].ge(0).all()
     assert metrics["b2_p90_ae_mean_h"].ge(0).all()
+    grouped_metrics = pd.read_csv(paths.model_r_group_metrics)
+    assert set(grouped_metrics["checkpoint"]) == set(range(7))
+    assert set(grouped_metrics["group_type"]) == {
+        "journey",
+        "connection_type",
+        "missed_connection",
+        "hidden_stage",
+    }
     intervals = pd.read_csv(paths.model_q_predictions)
     assert (
         intervals["predicted_final_lower_h"] <= intervals["predicted_final_upper_h"]
@@ -236,6 +246,54 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     assert set(threshold_sweep["checkpoint"]) == set(range(7))
     assert threshold_sweep["threshold"].nunique() == 21
     assert threshold_sweep["f1_mean"].between(0, 1).all()
+
+
+def test_custom_evaluation_predictions_require_matching_metadata():
+    with pytest.raises(ConfigurationError, match="explicit.*metadata"):
+        EtaPipeline().build_evaluation(model_path=Path("custom/model_r.csv"))
+
+
+def test_eval_cli_passes_explicit_predictions_and_metadata(monkeypatch):
+    paths = [
+        Path("custom/model_r.csv"),
+        Path("custom/baselines.csv"),
+        Path("custom/shipments.csv"),
+        Path("custom/truth.csv"),
+        Path("custom/hidden_mask.csv"),
+    ]
+    calls = []
+    monkeypatch.setattr(
+        EtaPipeline,
+        "build_evaluation",
+        lambda self, *inputs: calls.append((inputs, self.paths.model_r_group_metrics)),
+    )
+    monkeypatch.setattr(
+        EtaPipeline,
+        "run_to",
+        lambda self, target: pytest.fail("explicit inputs must skip prerequisites"),
+    )
+
+    assert (
+        main(
+            [
+                "eval",
+                "--model-r",
+                str(paths[0]),
+                "--baselines",
+                str(paths[1]),
+                "--shipments",
+                str(paths[2]),
+                "--truth",
+                str(paths[3]),
+                "--hidden-mask",
+                str(paths[4]),
+                "--out",
+                "custom/output",
+            ]
+        )
+        == 0
+    )
+    assert calls == [(tuple(paths), Path("custom/output/model_r_by_group.csv"))]
 
 
 def test_artifact_read_error_includes_path_and_cause(tmp_path):

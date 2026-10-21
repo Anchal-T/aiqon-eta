@@ -6,6 +6,7 @@ import pytest
 from src.errors import ContractError
 from src.evaluate import (
     compare_model_r_to_b2,
+    compare_model_r_to_b2_by_group,
     evaluate_model_c_classification_metrics,
     evaluate_model_c_reliability,
     evaluate_model_c_threshold_sweep,
@@ -57,6 +58,120 @@ def test_model_r_comparison_reports_held_out_mae_by_checkpoint():
     assert comparison["b2_rmse_mean_h"] == pytest.approx((16**0.5 + 12.5**0.5) / 2)
     assert comparison["model_beats_b2_seeds"] == 2
     assert comparison["n_split_seeds"] == 2
+
+
+def test_model_r_group_metrics_report_all_cuts_by_checkpoint_across_seeds():
+    predictions = pd.DataFrame(
+        [
+            (seed, shipment, 4, actual, actual + errors[shipment])
+            for seed, errors in (
+                (1, {"A": 2.0, "B": 1.0, "C": 1.0, "D": 4.0}),
+                (2, {"A": 1.0, "B": 2.0, "C": 4.0, "D": 1.0}),
+            )
+            for shipment, actual in zip("ABCD", (10.0, 20.0, 30.0, 40.0))
+        ],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "actual_final_delay_h",
+            "predicted_final_delay_h",
+        ),
+    )
+    baseline_predictions = pd.DataFrame(
+        [
+            (seed, shipment, 4, "B2", actual + errors[shipment])
+            for seed, errors in (
+                (1, {"A": 4.0, "B": 2.0, "C": 3.0, "D": 1.0}),
+                (2, {"A": 2.0, "B": 4.0, "C": 1.0, "D": 3.0}),
+            )
+            for shipment, actual in zip("ABCD", (10.0, 20.0, 30.0, 40.0))
+        ],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "baseline",
+            "predicted_final_delay_h",
+        ),
+    )
+    shipments = pd.DataFrame(
+        [
+            ("A", "J1", None),
+            ("B", "J1", "HUB"),
+            ("C", "J2", "HUB"),
+            ("D", "J2", "HUB"),
+        ],
+        columns=("shipment_id", "journey_id", "hub"),
+    )
+    truth = pd.DataFrame(
+        [(shipment, shipment == "D") for shipment in "ABCD"],
+        columns=("shipment_id", "missed_connection"),
+    )
+    hidden_mask = pd.DataFrame(
+        [("B", "act_customs"), ("D", "act_port_done"), ("D", "act_customs")],
+        columns=("shipment_id", "column"),
+    )
+
+    metrics = compare_model_r_to_b2_by_group(
+        predictions, baseline_predictions, shipments, truth, hidden_mask
+    )
+
+    assert set(metrics["group_type"]) == {
+        "journey",
+        "connection_type",
+        "missed_connection",
+        "hidden_stage",
+    }
+    assert set(
+        metrics.loc[metrics["group_type"] == "connection_type", "group_value"]
+    ) == {"direct", "connecting"}
+    assert set(
+        metrics.loc[metrics["group_type"] == "missed_connection", "group_value"]
+    ) == {"true", "false"}
+    assert set(metrics.loc[metrics["group_type"] == "hidden_stage", "group_value"]) == {
+        "with_hidden_stage",
+        "without_hidden_stage",
+    }
+    journey = metrics.loc[
+        (metrics["group_type"] == "journey") & (metrics["group_value"] == "J1")
+    ].iloc[0]
+    assert journey["model_mae_mean_h"] == pytest.approx(1.5)
+    assert journey["b2_mae_mean_h"] == pytest.approx(3.0)
+    assert journey["n_split_seeds"] == 2
+
+
+def test_model_r_group_metrics_reject_metadata_missing_prediction_shipments():
+    predictions = pd.DataFrame(
+        [(1, "A", 4, 10.0, 11.0)],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "actual_final_delay_h",
+            "predicted_final_delay_h",
+        ),
+    )
+    baseline_predictions = pd.DataFrame(
+        [(1, "A", 4, "B2", 12.0)],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "baseline",
+            "predicted_final_delay_h",
+        ),
+    )
+    shipments = pd.DataFrame(
+        [("B", "J1", None)], columns=("shipment_id", "journey_id", "hub")
+    )
+    truth = pd.DataFrame([("B", False)], columns=("shipment_id", "missed_connection"))
+    hidden_mask = pd.DataFrame(columns=("shipment_id", "column"))
+
+    with pytest.raises(ContractError, match="metadata is missing"):
+        compare_model_r_to_b2_by_group(
+            predictions, baseline_predictions, shipments, truth, hidden_mask
+        )
 
 
 def test_model_q_interval_metrics_report_coverage_width_and_crossings():

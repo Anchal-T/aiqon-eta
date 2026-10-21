@@ -57,6 +57,7 @@ class ArtifactPaths:
     baseline_predictions: Path = Path("data/processed/baseline_predictions.csv")
     model_r_predictions: Path = Path("outputs/predictions/model_r.csv")
     model_r_metrics: Path = Path("outputs/metrics/model_r_vs_b2.csv")
+    model_r_group_metrics: Path = Path("outputs/metrics/model_r_by_group.csv")
     model_q_predictions: Path = Path("outputs/predictions/model_q.csv")
     model_q_metrics: Path = Path("outputs/metrics/model_q_coverage.csv")
     model_c_predictions: Path = Path("outputs/predictions/model_c.csv")
@@ -138,10 +139,23 @@ _CLI_TARGETS = {
     ),
     "eval": _CliTarget(
         stage="evaluation",
-        path_args=("model-r", "baselines", "out"),
+        path_args=(
+            "model-r",
+            "baselines",
+            "shipments",
+            "truth",
+            "hidden-mask",
+            "out",
+        ),
         explicit_method="build_evaluation",
-        explicit_inputs=("model_r", "baselines"),
-        output_fields=("model_r_metrics",),
+        explicit_inputs=(
+            "model_r",
+            "baselines",
+            "shipments",
+            "truth",
+            "hidden_mask",
+        ),
+        output_fields=("model_r_metrics", "model_r_group_metrics"),
     ),
     "model-q": _CliTarget(
         stage="model_q",
@@ -261,8 +275,26 @@ class EtaPipeline:
         self,
         model_path: Path | None = None,
         baselines_path: Path | None = None,
+        shipments_path: Path | None = None,
+        truth_path: Path | None = None,
+        hidden_mask_path: Path | None = None,
     ) -> None:
-        """Compare Model R's held-out MAE with B2 by checkpoint."""
+        """Report checkpoint and subgroup metrics for Model R vs B2."""
+        metadata_paths = (shipments_path, truth_path, hidden_mask_path)
+        if (model_path is not None or baselines_path is not None) and any(
+            path is None for path in metadata_paths
+        ):
+            raise ConfigurationError(
+                "custom Model R or baseline predictions require explicit "
+                "--shipments, --truth, and --hidden-mask metadata"
+            )
+        if any(path is not None for path in metadata_paths) and any(
+            path is None for path in metadata_paths
+        ):
+            raise ConfigurationError(
+                "evaluation metadata must include shipments, truth, and hidden mask"
+            )
+
         model_predictions = _read_artifact(
             model_path if model_path is not None else self.paths.model_r_predictions
         )
@@ -274,7 +306,24 @@ class EtaPipeline:
         metrics = evaluate.compare_model_r_to_b2(
             model_predictions, baseline_predictions
         )
+        metadata = (
+            ingest.load(
+                shipments_path
+                if shipments_path is not None
+                else self.paths.raw_shipments
+            ),
+            _read_artifact(truth_path if truth_path is not None else self.paths.truth),
+            _read_artifact(
+                hidden_mask_path
+                if hidden_mask_path is not None
+                else self.paths.hidden_mask
+            ),
+        )
+        grouped_metrics = evaluate.compare_model_r_to_b2_by_group(
+            model_predictions, baseline_predictions, *metadata
+        )
         _write_artifact(metrics, self.paths.model_r_metrics)
+        _write_artifact(grouped_metrics, self.paths.model_r_group_metrics)
 
     def build_model_q(
         self,
