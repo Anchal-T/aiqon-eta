@@ -62,6 +62,10 @@ class ArtifactPaths:
     model_c_predictions: Path = Path("outputs/predictions/model_c.csv")
     model_c_reliability: Path = Path("outputs/metrics/model_c_reliability.csv")
     model_c_reliability_plot: Path = Path("outputs/metrics/model_c_reliability.png")
+    model_c_classification_metrics: Path = Path(
+        "outputs/metrics/model_c_classification_metrics.csv"
+    )
+    model_c_threshold_sweep: Path = Path("outputs/metrics/model_c_threshold_sweep.csv")
 
 
 @dataclass(frozen=True)
@@ -165,7 +169,12 @@ _CLI_TARGETS = {
         path_args=("model-c", "out"),
         explicit_method="build_model_c_evaluation",
         explicit_inputs=("model_c",),
-        output_fields=("model_c_reliability", "model_c_reliability_plot"),
+        output_fields=(
+            "model_c_reliability",
+            "model_c_reliability_plot",
+            "model_c_classification_metrics",
+            "model_c_threshold_sweep",
+        ),
     ),
 }
 
@@ -311,10 +320,14 @@ class EtaPipeline:
             model_c_path if model_c_path is not None else self.paths.model_c_predictions
         )
         reliability = evaluate.evaluate_model_c_reliability(predictions)
+        metrics = evaluate.evaluate_model_c_classification_metrics(predictions)
+        threshold_sweep = evaluate.evaluate_model_c_threshold_sweep(predictions)
         evaluate.plot_model_c_reliability(
             reliability, self.paths.model_c_reliability_plot
         )
         _write_artifact(reliability, self.paths.model_c_reliability)
+        _write_artifact(metrics, self.paths.model_c_classification_metrics)
+        _write_artifact(threshold_sweep, self.paths.model_c_threshold_sweep)
 
     def run_to(self, target: _PipelineStageName) -> None:
         """Run the target's prerequisites once, without unrelated branches."""

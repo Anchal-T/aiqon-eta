@@ -35,6 +35,14 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         / "outputs"
         / "metrics"
         / "model_c_reliability.png",
+        model_c_classification_metrics=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_c_classification_metrics.csv",
+        model_c_threshold_sweep=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_c_threshold_sweep.csv",
     )
 
 
@@ -164,6 +172,8 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.model_c_predictions,
             paths.model_c_reliability,
             paths.model_c_reliability_plot,
+            paths.model_c_classification_metrics,
+            paths.model_c_threshold_sweep,
         )
     )
     assert (
@@ -216,6 +226,14 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     assert reliability["observed_delay_rate"].between(0, 1).all()
     assert reliability["n_predictions"].gt(0).all()
     assert paths.model_c_reliability_plot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    classification_metrics = pd.read_csv(paths.model_c_classification_metrics)
+    assert set(classification_metrics["checkpoint"]) == set(range(7))
+    assert classification_metrics["brier_score_mean"].between(0, 1).all()
+    assert classification_metrics["f1_at_0_5_mean"].between(0, 1).all()
+    threshold_sweep = pd.read_csv(paths.model_c_threshold_sweep)
+    assert set(threshold_sweep["checkpoint"]) == set(range(7))
+    assert threshold_sweep["threshold"].nunique() == 21
+    assert threshold_sweep["f1_mean"].between(0, 1).all()
 
 
 def test_artifact_read_error_includes_path_and_cause(tmp_path):
@@ -338,6 +356,8 @@ def test_model_c_evaluation_cli_starts_from_explicit_predictions(monkeypatch):
                 model_c_path,
                 self.paths.model_c_reliability,
                 self.paths.model_c_reliability_plot,
+                self.paths.model_c_classification_metrics,
+                self.paths.model_c_threshold_sweep,
             )
         ),
     )
@@ -355,6 +375,8 @@ def test_model_c_evaluation_cli_starts_from_explicit_predictions(monkeypatch):
             predictions,
             output_dir / "model_c_reliability.csv",
             output_dir / "model_c_reliability.png",
+            output_dir / "model_c_classification_metrics.csv",
+            output_dir / "model_c_threshold_sweep.csv",
         )
     ]
 

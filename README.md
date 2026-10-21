@@ -33,10 +33,11 @@ Model R predicts `remaining_delay_h` with an L1 LightGBM regressor and adds it
 to `delay_so_far`. Its held-out MAE is compared with B2 by checkpoint and split
 seed. Model Q fits 0.1 and 0.9 quantile regressors and reports held-out interval
 coverage and width by checkpoint; crossed quantiles are ordered into interval
-bounds and flagged. Model C writes held-out probabilities of delay and a
-reliability curve by checkpoint, using 10 equal-width probability bins. The
-probabilities are not post-hoc calibrated. Broader metric cuts, missingness
-sweeps, and explanations remain future phases.
+bounds and flagged. Model C reports held-out Brier score, ROC-AUC, PR-AUC,
+F1 at 0.5, a threshold sweep from 0 to 1 in 0.05 steps, and a reliability
+curve by checkpoint using 10 equal-width probability bins. The probabilities
+are not post-hoc calibrated. Broader metric cuts, missingness sweeps, and
+explanations remain future phases.
 
 ## The data
 
@@ -72,9 +73,11 @@ B2 comparison are written to `outputs/predictions/model_r.csv` and
 `outputs/metrics/model_r_vs_b2.csv`. Model Q intervals and checkpoint coverage
 metrics are written to `outputs/predictions/model_q.csv` and
 `outputs/metrics/model_q_coverage.csv`. Model C's held-out delay probabilities
-are written to `outputs/predictions/model_c.csv`; its reliability-bin table and
-plot are written to `outputs/metrics/model_c_reliability.csv` and
-`outputs/metrics/model_c_reliability.png`.
+are written to `outputs/predictions/model_c.csv`. Its reliability-bin table
+and plot are written to `outputs/metrics/model_c_reliability.csv` and
+`outputs/metrics/model_c_reliability.png`; classification metrics and the
+threshold sweep are in `outputs/metrics/model_c_classification_metrics.csv` and
+`outputs/metrics/model_c_threshold_sweep.csv`.
 
 The random draws behind the holes are made once per cell and thresholded by
 the rate, so the hidden sets nest: the cells hidden at rate 0.1 are a subset
@@ -129,7 +132,7 @@ src/model_training.py shared validation and grouped Model R/Q fitting
 src/model_r.py     Model R point regressor
 src/model_q.py     Model Q interval regressors
 src/model_c.py     Model C delay classifier
-src/evaluate.py   held-out regression, interval, and Model C reliability evaluation
+src/evaluate.py   held-out regression, interval, and classification evaluation
 tests/            data contracts, arithmetic, leakage, splits, and model checks
 data/raw/         generated data
 data/interim/     observed logs, the mask, and the delay table

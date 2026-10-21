@@ -6,7 +6,9 @@ import pytest
 from src.errors import ContractError
 from src.evaluate import (
     compare_model_r_to_b2,
+    evaluate_model_c_classification_metrics,
     evaluate_model_c_reliability,
+    evaluate_model_c_threshold_sweep,
     evaluate_model_q_intervals,
 )
 
@@ -107,6 +109,62 @@ def test_model_c_reliability_reports_observed_rate_by_checkpoint_and_bin():
     )
     assert curve["observed_delay_rate"].tolist() == [0.5, 1.0, 1.0, 0.0, 1.0]
     assert curve["n_predictions"].tolist() == [2, 1, 1, 1, 1]
+
+
+def test_model_c_metrics_and_threshold_sweep_summarize_split_seeds():
+    predictions = pd.DataFrame(
+        [
+            (1, "A", 2, 0, 0.1),
+            (1, "B", 2, 1, 0.8),
+            (1, "C", 2, 0, 0.4),
+            (1, "D", 2, 1, 0.7),
+            (2, "E", 2, 0, 0.2),
+            (2, "F", 2, 1, 0.6),
+            (2, "G", 2, 0, 0.3),
+            (2, "H", 2, 1, 0.1),
+        ],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "actual_is_delayed",
+            "predicted_delay_probability",
+        ),
+    )
+
+    metrics = evaluate_model_c_classification_metrics(predictions).iloc[0]
+    threshold = evaluate_model_c_threshold_sweep(predictions)
+    at_half = threshold.loc[
+        (threshold["checkpoint"] == 2) & (threshold["threshold"] == 0.5)
+    ].iloc[0]
+
+    assert metrics["brier_score_mean"] == pytest.approx(0.175)
+    assert metrics["roc_auc_mean"] == pytest.approx(0.75)
+    assert metrics["pr_auc_mean"] == pytest.approx(41 / 48)
+    assert metrics["f1_at_0_5_mean"] == pytest.approx(5 / 6)
+    assert metrics["n_split_seeds"] == 2
+    assert at_half["precision_mean"] == pytest.approx(1.0)
+    assert at_half["recall_mean"] == pytest.approx(0.75)
+    assert at_half["f1_mean"] == pytest.approx(5 / 6)
+
+
+def test_model_c_auc_metrics_are_missing_when_a_seed_has_one_label():
+    predictions = pd.DataFrame(
+        [(1, "A", 2, 0, 0.1), (1, "B", 2, 0, 0.2)],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "actual_is_delayed",
+            "predicted_delay_probability",
+        ),
+    )
+
+    metrics = evaluate_model_c_classification_metrics(predictions).iloc[0]
+
+    assert pd.isna(metrics["roc_auc_mean"])
+    assert pd.isna(metrics["pr_auc_mean"])
+    assert metrics["n_auc_split_seeds"] == 0
 
 
 def test_model_c_reliability_rejects_non_binary_labels_and_invalid_probabilities():

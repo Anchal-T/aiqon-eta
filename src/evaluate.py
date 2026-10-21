@@ -6,6 +6,15 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import (
+    auc,
+    brier_score_loss,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 
 from src.errors import ArtifactError, ContractError
 
@@ -25,6 +34,8 @@ _C_COLUMNS = (
     "predicted_delay_probability",
 )
 _RELIABILITY_BINS = 10
+_CLASSIFICATION_THRESHOLD = 0.5
+_THRESHOLD_SWEEP = tuple(index / 20 for index in range(21))
 
 
 def _validated_prediction_keys(table: pd.DataFrame) -> pd.DataFrame:
@@ -155,6 +166,93 @@ def _validated_model_c_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
     table["actual_is_delayed"] = labels.astype("int8")
     table["predicted_delay_probability"] = probabilities
     return table
+
+
+def _model_c_metrics_by_seed(table: pd.DataFrame) -> pd.DataFrame:
+    records = []
+    for (seed, checkpoint), rows in table.groupby(
+        ["split_seed", "checkpoint"], sort=True
+    ):
+        labels = rows["actual_is_delayed"].to_numpy(dtype=int)
+        probabilities = rows["predicted_delay_probability"].to_numpy(dtype=float)
+        has_both_labels = np.unique(labels).size == 2
+        if has_both_labels:
+            precision, recall, _ = precision_recall_curve(labels, probabilities)
+            pr_auc = auc(recall, precision)
+            roc_auc = roc_auc_score(labels, probabilities)
+        else:
+            pr_auc = np.nan
+            roc_auc = np.nan
+        records.append(
+            {
+                "split_seed": seed,
+                "checkpoint": checkpoint,
+                "brier_score": brier_score_loss(labels, probabilities),
+                "roc_auc": roc_auc,
+                "pr_auc": pr_auc,
+                "f1_at_0_5": f1_score(
+                    labels,
+                    probabilities >= _CLASSIFICATION_THRESHOLD,
+                    zero_division=0,
+                ),
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def evaluate_model_c_classification_metrics(
+    predictions: pd.DataFrame,
+) -> pd.DataFrame:
+    """Summarize held-out classification metrics by checkpoint across seeds."""
+    table = _validated_model_c_predictions(predictions)
+    by_seed = _model_c_metrics_by_seed(table)
+    summary = by_seed.groupby("checkpoint", as_index=False).agg(
+        brier_score_mean=("brier_score", "mean"),
+        brier_score_std=("brier_score", "std"),
+        roc_auc_mean=("roc_auc", "mean"),
+        roc_auc_std=("roc_auc", "std"),
+        pr_auc_mean=("pr_auc", "mean"),
+        pr_auc_std=("pr_auc", "std"),
+        f1_at_0_5_mean=("f1_at_0_5", "mean"),
+        f1_at_0_5_std=("f1_at_0_5", "std"),
+        n_split_seeds=("split_seed", "nunique"),
+        n_auc_split_seeds=("roc_auc", "count"),
+    )
+    return summary
+
+
+def evaluate_model_c_threshold_sweep(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Report precision, recall, and F1 over fixed thresholds by checkpoint."""
+    table = _validated_model_c_predictions(predictions)
+    records = []
+    for (seed, checkpoint), rows in table.groupby(
+        ["split_seed", "checkpoint"], sort=True
+    ):
+        labels = rows["actual_is_delayed"].to_numpy(dtype=int)
+        probabilities = rows["predicted_delay_probability"].to_numpy(dtype=float)
+        for threshold in _THRESHOLD_SWEEP:
+            predicted = probabilities >= threshold
+            records.append(
+                {
+                    "split_seed": seed,
+                    "checkpoint": checkpoint,
+                    "threshold": threshold,
+                    "precision": precision_score(labels, predicted, zero_division=0),
+                    "recall": recall_score(labels, predicted, zero_division=0),
+                    "f1": f1_score(labels, predicted, zero_division=0),
+                }
+            )
+
+    by_seed = pd.DataFrame(records)
+    return by_seed.groupby(["checkpoint", "threshold"], as_index=False).agg(
+        precision_mean=("precision", "mean"),
+        precision_std=("precision", "std"),
+        recall_mean=("recall", "mean"),
+        recall_std=("recall", "std"),
+        f1_mean=("f1", "mean"),
+        f1_std=("f1", "std"),
+        n_split_seeds=("split_seed", "nunique"),
+    )
 
 
 def evaluate_model_c_reliability(predictions: pd.DataFrame) -> pd.DataFrame:
