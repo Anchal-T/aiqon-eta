@@ -3,28 +3,43 @@
 Predict how late a shipment will be, and explain why.
 
 Given a shipment's route, schedule and the milestones already observed, the
-model predicts the delay at delivery, a range for it, and the chance that it
+models predict the delay at delivery, a range for it, and the chance that it
 is late. Every prediction can be broken down into what already happened and
 what the model expects next.
+
+**Report:** [report/report.pdf](report/report.pdf) (2 pages, source in `report/report.md`)
+
+## Results at a glance
+
+Held-out means over 5 split seeds (42 to 46). Skill = 1 - MAE(Model R) / MAE(B2).
+
+| Checkpoint | Model R MAE (h) | B2 MAE (h) | Skill | Model C ROC-AUC |
+| ---------- | --------------- | ---------- | ----- | --------------- |
+| C0 (nothing observed) | 14.72 | 17.55 | 0.16 | 0.56 |
+| C3 (after hub departure) | 9.28 | 9.25 | -0.003 | 0.73 |
+| C4 | 4.64 | 7.27 | 0.36 | 0.90 |
+| C6 (after customs) | 2.42 | 4.13 | 0.41 | 0.96 |
+
+Model R beats the strongest baseline (B2, delay so far) on all 5 seeds at
+every checkpoint except C3, where it ties. Full table and discussion are in
+the report. Sources: `outputs/metrics/model_r_vs_b2.csv` and
+`outputs/metrics/model_c_classification_metrics.csv`.
 
 ## Run it
 
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-make all       # builds data, Models R/Q/C, evaluations, explanations, ablations, and manifest
+make all       # data, features, splits, baselines, Models R/Q/C, evaluation, missingness sweep, explanations, ablations, manifest
 make test      # runs the test suite
 ```
 
-`make all` runs data generation, features, splits, held-out baselines, Models
-R/Q/C, the missingness sweep, explanations, and Model R feature ablations through
-`src.pipeline`; it writes a run manifest with the seed, configuration, revision,
-and headline metrics. Model C selects parameters using grouped cross-validation.
-The `make features`, `make splits`, `make baselines`,
-`make train`, `make eval`, `make train-q`, `make train-c`, `make eval-q`,
-`make eval-c`, `make eval-missingness`, and `make explain` targets build their
-prerequisites automatically.
-To start from existing upstream artifacts, use:
+Individual stages build their prerequisites automatically:
+`make data`, `make features`, `make splits`, `make baselines`, `make train`,
+`make eval`, `make train-q`, `make eval-q`, `make train-c`, `make eval-c`,
+`make eval-missingness`, `make explain`, `make clean`.
+
+To start from existing upstream artifacts:
 
 ```bash
 .venv/bin/python -m src.pipeline data --raw PATH
@@ -32,86 +47,78 @@ To start from existing upstream artifacts, use:
 .venv/bin/python -m src.pipeline splits --stacked PATH
 ```
 
-Model R predicts `remaining_delay_h` with an L1 LightGBM regressor and adds it
-to `delay_so_far`. Its held-out MAE, median and P90 absolute error, and RMSE
-are compared with B2 by checkpoint across split seeds and by journey,
-connection type, missed-connection truth, and hidden-stage presence. Model Q
-fits 0.1 and 0.9 quantile regressors and reports held-out interval coverage,
-width, and quantile crossings by checkpoint and the same shipment cuts. Model
-C reports held-out Brier score, ROC-AUC, PR-AUC, F1 at 0.5, a threshold sweep
-from 0 to 1 in 0.05 steps, and a reliability curve using 10 equal-width
-probability bins, all by checkpoint and shipment cut. The probabilities are
-not post-hoc calibrated. The missingness sweep is available separately through
-`make eval-missingness`; explanations are available through `make explain`.
+When custom prediction files are passed to `eval`, `eval-q` or `eval-c`, also
+pass matching `--shipments`, `--truth` and `--hidden-mask` files.
+
+## Models
+
+| Model | What it does |
+| ----- | ------------ |
+| B0, B1, B2 | Baselines: zero delay, the journey mean from outer-training shipments, and `delay_so_far`. |
+| Model R | L1 LightGBM regressor on `remaining_delay_h`, added to `delay_so_far`. |
+| Model Q | 0.1 and 0.9 quantile regressors for an 80% interval. |
+| Model C | Delay classifier (late = more than 6 h). Picks from a 4-candidate grid by shipment-grouped CV log loss. Probabilities are not post-hoc calibrated. |
+
+Evaluation is on held-out shipments, by checkpoint, across split seeds, and by
+journey, connection type, missed-connection truth and hidden-stage presence.
+Model R reports MAE, median and P90 absolute error and RMSE. Model Q reports
+coverage, width and quantile crossings. Model C reports Brier score, ROC-AUC,
+PR-AUC, F1 at 0.5, a threshold sweep from 0 to 1 in 0.05 steps, and a
+reliability curve with 10 equal-width bins.
+
+Explanations use grouped TreeSHAP contributions plus observed-stage facts,
+checked against the planted causes. Ablations compare Model R feature sets
+A0 (route, plan, observed delays), A1 (+ environment) and A2 (+ link features).
+
+## Outputs
+
+| Path | Contents |
+| ---- | -------- |
+| `data/processed/baseline_predictions.csv` | One held-out prediction per split seed, shipment, checkpoint and baseline |
+| `outputs/predictions/model_r.csv`, `model_q.csv`, `model_c.csv` | Held-out predictions, intervals and delay probabilities |
+| `outputs/metrics/model_r_vs_b2.csv` | Model R vs B2 by checkpoint |
+| `outputs/metrics/model_r_vs_baselines.png` | MAE by checkpoint for B0, B1, B2 and Model R |
+| `outputs/metrics/model_r_by_group.csv` | Model R metrics by journey and shipment subgroup |
+| `outputs/metrics/model_q_coverage.csv`, `model_q_by_group.csv` | Interval coverage, overall and by subgroup |
+| `outputs/metrics/model_c_tuning.csv` | Grouped-CV candidate scores and selected parameters |
+| `outputs/metrics/model_c_classification_metrics.csv`, `model_c_threshold_sweep.csv` | Classification metrics and threshold sweep |
+| `outputs/metrics/model_c_reliability.csv`, `.png` | Reliability table and plot (plus `*_by_group.csv` versions) |
+| `outputs/metrics/model_r_missingness_sweep.csv`, `.png` | Model R MAE at missing rates 0, 0.1, 0.2 and 0.3 |
+| `outputs/predictions/model_r_explanations.csv` | Grouped TreeSHAP explanations |
+| `outputs/metrics/model_r_explanation_recovery.csv` | Explanations checked against the planted causes |
+| `outputs/metrics/model_r_ablations.csv` | A0, A1 and A2 ablation results |
+| `outputs/run_manifest.json` | Seed, configuration, Git revision, worktree status and headline metrics |
+
+One waterfall plot for a single prediction:
+
+```bash
+.venv/bin/python -m src.pipeline explain --shipment-id S007 --split-seed 42 --checkpoint 4
+```
+
+This writes `outputs/metrics/model_r_explanation_waterfall.png`.
 
 ## The data
 
-The data is synthetic, generated by `src/generate.py` from a seed. Two files
-come out of it:
+The data is synthetic, generated by `src/generate.py` from a seed: 300
+shipments over 19 route templates, 55% of them connecting through one hub.
 
-| File                     | What it is                                                                                                       |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `data/raw/shipments.csv` | What a real system would see: route, schedule, observed milestones, environment.                                 |
-| `data/raw/truth.csv`     | Hidden causes - missed connection, missed berth slot, storms. Read only by the evaluation and explanation steps. |
+| File | What it is |
+| ---- | ---------- |
+| `data/raw/shipments.csv` | What a real system would see: route, schedule, observed milestones, environment. |
+| `data/raw/truth.csv` | Hidden causes: missed connection, missed berth slot, storms. Read only by evaluation and explanation. |
+| `data/interim/observed.csv` | The shipments as the system sees them, with part of the logs missing. |
+| `data/interim/hidden_mask.csv` | Every hidden cell: the shipment, the column, and the value that was there. |
+| `data/interim/delays.csv` | Per shipment: each stage's delay, the delay it added, and whether that covers a merged span. |
 
-300 shipments over 19 route templates, 55% of them connecting through one
-hub. The raw file is deliberately complete: no missing timestamps. Missing
-logs are simulated in a separate step so the generator stays the one place
-where the world is defined.
-
-`make data` then produces three more files under `data/interim/`:
-
-| File              | What it is                                                                                                                    |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `observed.csv`    | The shipments as the system sees them, with part of the logs missing.                                                         |
-| `hidden_mask.csv` | Every hidden cell: the shipment, the column, the value that was there.                                                        |
-| `delays.csv`      | One row per shipment: the delay of each stage, the delay each stage added, and whether that added delay covers a merged span. |
-
-Only `act_port_done` and `act_customs` are ever hidden. The departure is
-always there and the delivery is the target, so neither is ever touched.
-
-`make all` also writes `data/processed/baseline_predictions.csv`, with one
-held-out prediction per split seed, shipment, checkpoint, and baseline. B0
-predicts zero delay, B1 predicts the journey mean from outer-training shipments,
-and B2 predicts `delay_so_far`. Model R predictions and its checkpoint-level
-comparison with B2 (MAE, median/P90 absolute error, and RMSE) are written to
-`outputs/predictions/model_r.csv` and `outputs/metrics/model_r_vs_b2.csv`; the
-B0/B1/B2/Model R MAE-by-checkpoint plot is
-`outputs/metrics/model_r_vs_baselines.png`, and the same metrics by journey and shipment subgroup are in
-`outputs/metrics/model_r_by_group.csv`. Model Q intervals and checkpoint
-coverage metrics are written to `outputs/predictions/model_q.csv` and
-`outputs/metrics/model_q_coverage.csv`; subgroup metrics are in
-`outputs/metrics/model_q_by_group.csv`. Model C's held-out delay probabilities
-are written to `outputs/predictions/model_c.csv`; grouped-CV candidate scores
-and selected parameters are in `outputs/metrics/model_c_tuning.csv`. Its reliability-bin table
-and plot are written to `outputs/metrics/model_c_reliability.csv` and
-`outputs/metrics/model_c_reliability.png`; classification metrics and the
-threshold sweep are in `outputs/metrics/model_c_classification_metrics.csv` and
-`outputs/metrics/model_c_threshold_sweep.csv`. The grouped reliability,
-classification metrics, and threshold sweep are in the corresponding
-`*_by_group.csv` artifacts. The missingness sweep writes checkpoint-level Model
-R MAE means and spread (plus B2 metrics) to
-`outputs/metrics/model_r_missingness_sweep.csv` and plots Model R MAE against
-missing rate in `outputs/metrics/model_r_missingness_sweep.png`. It evaluates
-rates 0, 0.1, 0.2, and 0.3 using the same generated seed and split seeds.
-Model R explanations use grouped TreeSHAP contributions and observed-stage facts.
-They are written to `outputs/predictions/model_r_explanations.csv`, with truth
-checks in `outputs/metrics/model_r_explanation_recovery.csv`; grouped summary,
-`slack_remaining` and `slot_margin` dependence plots are written under
-`outputs/`. Request one waterfall, written to
-`outputs/metrics/model_r_explanation_waterfall.png`, with
-`.venv/bin/python -m src.pipeline explain --shipment-id S007 --split-seed 42 --checkpoint 4`.
-Model R ablation results for A0 (route/plan/observed delays), A1 (+ environment),
-and A2 (+ link features) are in `outputs/metrics/model_r_ablations.csv`.
-`outputs/run_manifest.json` records the run configuration, Git revision, and
-headline metric summaries. When custom prediction files are passed to `eval`,
-`eval-q`, or `eval-c`, also pass matching `--shipments`, `--truth`, and
-`--hidden-mask` files.
+The raw file is deliberately complete. Missing logs are simulated in a
+separate step, so the generator stays the one place where the world is
+defined. Only `act_port_done` and `act_customs` are ever hidden; the departure
+is always present and the delivery is the target.
 
 The random draws behind the holes are made once per cell and thresholded by
-the rate, so the hidden sets nest: the cells hidden at rate 0.1 are a subset
-of those hidden at 0.2. The missing-rate sweep then compares the same world
-at different rates rather than different worlds.
+the rate, so hidden sets nest: cells hidden at rate 0.1 are a subset of those
+hidden at 0.2. The missingness sweep therefore compares the same world at
+different rates rather than different worlds.
 
 ## How the delays work
 
@@ -122,70 +129,68 @@ it, and adds its own:
 delay_new = delay_in * (1 - absorb) + own_delay
 ```
 
-Absorption shows up in the timestamps - a leg that inherits lateness makes up
+Absorption shows up in the timestamps: a leg that inherits lateness makes up
 part of it by running faster than its nominal transit time. The hub is the
-exception. It either clears the lateness completely, because the cargo makes
-the connection and the hub buffer absorbs the delay, or it misses the sailing
-and the lateness resets to the wait for the next one.
+exception. Either the cargo makes the connection and the hub buffer clears
+the lateness, or it misses the sailing and the lateness resets to the wait
+for the next one.
 
-Five causes are planted in the data:
-
-| Cause             | What it does                                                                                    |
-| ----------------- | ----------------------------------------------------------------------------------------------- |
+| Cause | What it does |
+| ----- | ------------ |
 | Missed connection | The connecting sailing leaves without the cargo. The delay resets to the wait for the next one. |
-| Missed berth slot | The vessel arrives too late for its slot and waits for the next one.                            |
-| Congestion        | Realised port congestion above the port's own norm lengthens dwell and customs.                 |
-| Storm             | Rare, large, and confined to one leg.                                                           |
-| Absorption        | Every leg makes up part of the lateness it inherits.                                            |
+| Missed berth slot | The vessel arrives too late for its slot and waits for the next one. |
+| Congestion | Realised port congestion above the port's own norm lengthens dwell and customs. |
+| Storm | Rare, large, and confined to one leg. |
+| Absorption | Every leg makes up part of the lateness it inherits. |
 
-The penalty sizes - how long the next sailing waits, how long a lost berth
-slot costs - are **not** visible to the model. Knowing that a connection
-window exists is domain knowledge; knowing how big the penalty is has to be
-learned from the data.
+The penalty sizes (how long the next sailing waits, how long a lost berth
+slot costs) are **not** visible to the model. Knowing that a connection window
+exists is domain knowledge; how big the penalty is has to be learned.
+
+## The gap rule
+
+When a stage is hidden we cannot say what it added. The next visible stage is
+compared against the last visible one, and its added delay covers a span of
+the journey rather than a single stage. That is flagged in `merged_<stage>`
+instead of being passed off as a clean number. Direct shipments never have
+hub stages; those are not applicable rather than hidden, so they are skipped
+without flagging a gap.
 
 ## Layout
 
 ```
-src/config.py     domain constants and validated run settings
-src/errors.py     contextual pipeline and data-contract errors
-src/pipeline.py   artifact paths, I/O, command line, and stage orchestration
-src/generate.py   pure synthetic shipment generator
-src/ingest.py     reads, types, and validates shipment tables
-src/missingness.py pure missingness transform
-src/delays.py     pure stage-delay calculation
-src/checkpoints.py checkpoint visibility rules
-src/features.py   checkpoint-stacked feature and target transform
-src/splits.py     repeated shipment-level train/test and CV assignments
-src/baselines.py  held-out B0, B1, and B2 reference predictions
-src/model_training.py shared validation and grouped Model R/Q fitting
-src/model_r.py     Model R point regressor
-src/model_q.py     Model Q interval regressors
-src/model_c.py     Model C delay classifier
-src/evaluate.py   held-out regression, interval, and classification evaluation
-tests/            data contracts, arithmetic, leakage, splits, and model checks
-data/raw/         generated data
-data/interim/     observed logs, the mask, and the delay table
-data/processed/   stacked features, splits, and baseline predictions
-outputs/          held-out predictions, metrics, and the Model C reliability plot
+src/config.py          domain constants and validated run settings
+src/errors.py          contextual pipeline and data-contract errors
+src/pipeline.py        artifact paths, I/O, command line, stage orchestration
+src/generate.py        pure synthetic shipment generator
+src/ingest.py          reads, types and validates shipment tables
+src/missingness.py     pure missingness transform
+src/delays.py          pure stage-delay calculation
+src/checkpoints.py     checkpoint visibility rules
+src/features.py        checkpoint-stacked feature and target transform
+src/splits.py          repeated shipment-level train/test and CV assignments
+src/baselines.py       held-out B0, B1 and B2 predictions
+src/model_training.py  shared validation and grouped Model R/Q fitting
+src/model_r.py         Model R point regressor
+src/model_q.py         Model Q interval regressors
+src/model_c.py         Model C delay classifier with grouped-CV tuning
+src/evaluate.py        held-out regression, interval and classification evaluation
+src/explain.py         grouped TreeSHAP explanations and recovery checks
+src/ablations.py       Model R A0/A1/A2 feature ablations
+tests/                 data contracts, arithmetic, leakage, splits and model checks
+report/                the 2-page report (Markdown and PDF)
 ```
-
-## The gap rule
-
-When a stage is hidden we cannot say what it added. The next stage we can
-see is compared against the last one we could see, and its added delay
-covers a span of the journey rather than a single stage. That is flagged in
-`merged_<stage>` instead of being passed off as a clean number.
-
-Direct shipments never have hub stages. Those are not applicable, not
-hidden, so they are skipped without flagging a gap.
 
 ## Honest limits
 
 1. The data is synthetic. Results show that the method recovers planted
-   structure, not real port behaviour.
-2. The model is allowed two operational constants - a 12 h hub connection time
-   and a 12 h berth window. The penalty sizes are hidden.
-3. 300 shipments is a small sample. Report a mean and a spread over several
-   split seeds, not one number.
+   structure, not real port behaviour, and generator noise is not calibrated
+   to real data.
+2. The model is allowed two operational constants: a 12 h hub connection
+   time and a 12 h berth window. The penalty sizes are hidden.
+3. 300 shipments is a small sample, so results are a mean and spread over
+   several split seeds, not one number.
 4. Missing data is simulated as random. Real gaps usually are not.
 5. One hub per journey. Longer chains would repeat the same pattern.
+6. Model C probabilities are not calibrated, and Model Q intervals under-cover
+   (0.64 to 0.77 against 0.8).
