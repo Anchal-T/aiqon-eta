@@ -16,6 +16,7 @@ from src.evaluate import (
     evaluate_model_c_threshold_sweep_by_group,
     evaluate_model_q_intervals,
     evaluate_model_q_intervals_by_group,
+    plot_model_r_missingness_sweep,
 )
 
 
@@ -402,3 +403,21 @@ def test_model_c_reliability_rejects_non_binary_labels_and_invalid_probabilities
     predictions["predicted_delay_probability"] = 1.1
     with pytest.raises(ContractError, match="values must be between 0 and 1"):
         evaluate_model_c_reliability(predictions)
+
+
+def test_model_r_missingness_plot_writes_png_without_mutating_metrics(tmp_path):
+    metrics = pd.DataFrame(
+        {
+            "missing_rate": ["0", "0.1", "0", "0.1"],
+            "checkpoint": ["1", "1", "2", "2"],
+            "model_mae_mean_h": ["2.0", "2.5", "1.0", "1.5"],
+            "model_mae_std_h": [None, "0.2", None, "0.1"],
+        }
+    )
+    original = metrics.copy(deep=True)
+    output = tmp_path / "plots" / "missingness.png"
+
+    plot_model_r_missingness_sweep(metrics, output)
+
+    assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    pd.testing.assert_frame_equal(metrics, original)

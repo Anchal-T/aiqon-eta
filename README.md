@@ -12,14 +12,15 @@ what the model expects next.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-make all       # builds data, baselines, Models R/Q/C, and their evaluations
+make all       # builds data, Models R/Q/C, evaluations, and missingness sweep
 make test      # runs the test suite
 ```
 
-`make all` runs data generation, features, splits, held-out baselines, and
-Models R/Q/C through the central `src.pipeline` orchestrator. The
-`make features`, `make splits`, `make baselines`, `make train`, `make eval`,
-`make train-q`, `make train-c`, `make eval-q`, and `make eval-c` targets build
+`make all` runs data generation, features, splits, held-out baselines, Models
+R/Q/C, and the missingness sweep through the central `src.pipeline`
+orchestrator. The `make features`, `make splits`, `make baselines`, `make train`,
+`make eval`, `make train-q`, `make train-c`, `make eval-q`, `make eval-c`, and
+`make eval-missingness` targets build
 their prerequisites automatically.
 To start from existing upstream artifacts, use:
 
@@ -38,8 +39,8 @@ width, and quantile crossings by checkpoint and the same shipment cuts. Model
 C reports held-out Brier score, ROC-AUC, PR-AUC, F1 at 0.5, a threshold sweep
 from 0 to 1 in 0.05 steps, and a reliability curve using 10 equal-width
 probability bins, all by checkpoint and shipment cut. The probabilities are
-not post-hoc calibrated. Missingness sweeps and explanations remain future
-phases.
+not post-hoc calibrated. The missingness sweep is available separately through
+`make eval-missingness`; explanations remain a future phase.
 
 ## The data
 
@@ -84,7 +85,12 @@ and plot are written to `outputs/metrics/model_c_reliability.csv` and
 threshold sweep are in `outputs/metrics/model_c_classification_metrics.csv` and
 `outputs/metrics/model_c_threshold_sweep.csv`. The grouped reliability,
 classification metrics, and threshold sweep are in the corresponding
-`*_by_group.csv` artifacts. When custom prediction files are passed to `eval`,
+`*_by_group.csv` artifacts. The missingness sweep writes checkpoint-level Model
+R MAE means and spread (plus B2 metrics) to
+`outputs/metrics/model_r_missingness_sweep.csv` and plots Model R MAE against
+missing rate in `outputs/metrics/model_r_missingness_sweep.png`. It evaluates
+rates 0, 0.1, 0.2, and 0.3 using the same generated seed and split seeds.
+When custom prediction files are passed to `eval`,
 `eval-q`, or `eval-c`, also pass matching `--shipments`, `--truth`, and
 `--hidden-mask` files.
 

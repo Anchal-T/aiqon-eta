@@ -664,3 +664,77 @@ def evaluate_model_q_intervals_by_group(
     )
     by_seed = _model_q_metrics_by_seed(table, ("group_type", "group_value"))
     return _summarize_model_q_metrics(by_seed, ("group_type", "group_value"))
+
+
+def plot_model_r_missingness_sweep(metrics: pd.DataFrame, path: Path) -> None:
+    """Plot mean held-out Model R MAE by missingness rate and checkpoint."""
+    required = {
+        "missing_rate",
+        "checkpoint",
+        "model_mae_mean_h",
+        "model_mae_std_h",
+    }
+    missing = sorted(required - set(metrics.columns))
+    if missing:
+        raise ContractError(f"missingness sweep metrics are missing columns: {missing}")
+    if metrics.empty:
+        raise ContractError("missingness sweep metrics must be non-empty and unique")
+
+    table = metrics.copy()
+    for column in ("missing_rate", "checkpoint", "model_mae_mean_h"):
+        values = pd.to_numeric(table[column], errors="coerce")
+        if values.isna().any() or not np.isfinite(values).all():
+            raise ContractError(f"missingness sweep column {column} must be finite")
+        table[column] = values
+    if not table["missing_rate"].between(0.0, 1.0).all():
+        raise ContractError("missing rates must be between 0 and 1")
+    if (table["checkpoint"] % 1 != 0).any():
+        raise ContractError("missingness sweep checkpoints must be integers")
+
+    raw_spread = table["model_mae_std_h"]
+    spread = pd.to_numeric(raw_spread, errors="coerce")
+    invalid_spread = raw_spread.notna() & (spread.isna() | ~np.isfinite(spread))
+    if invalid_spread.any() or (spread.dropna() < 0).any():
+        raise ContractError(
+            "missingness sweep MAE spread must be finite and non-negative"
+        )
+    table["model_mae_std_h"] = spread.fillna(0)
+    if table.duplicated(["missing_rate", "checkpoint"]).any():
+        raise ContractError("missingness sweep metrics must be non-empty and unique")
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as error:
+        raise ArtifactError(
+            "matplotlib is required to write the missingness plot"
+        ) from error
+
+    figure, axis = plt.subplots(figsize=(8, 5))
+    try:
+        for checkpoint, rows in table.groupby("checkpoint", sort=True):
+            rows = rows.sort_values("missing_rate")
+            axis.errorbar(
+                rows["missing_rate"],
+                rows["model_mae_mean_h"],
+                yerr=rows["model_mae_std_h"],
+                marker="o",
+                capsize=3,
+                label=f"Checkpoint {checkpoint}",
+            )
+        axis.set(
+            xlabel="Missing rate",
+            ylabel="Held-out MAE (hours)",
+            title="Model R MAE vs missingness rate",
+        )
+        axis.set_xticks(sorted(table["missing_rate"].unique()))
+        axis.legend(title="Checkpoint")
+        axis.grid(alpha=0.25)
+        figure.tight_layout()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=150)
+    except OSError as error:
+        raise ArtifactError(
+            f"cannot write missingness sweep plot {path}: {error}"
+        ) from error
+    finally:
+        plt.close(figure)

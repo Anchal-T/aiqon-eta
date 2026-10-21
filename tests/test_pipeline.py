@@ -57,6 +57,14 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         / "outputs"
         / "metrics"
         / "model_c_threshold_sweep_by_group.csv",
+        model_r_missingness_sweep=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_r_missingness_sweep.csv",
+        model_r_missingness_sweep_plot=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_r_missingness_sweep.png",
     )
 
 
@@ -140,6 +148,7 @@ def test_run_all_executes_shared_prerequisites_once(monkeypatch):
         "interval_evaluation",
         "model_c",
         "model_c_evaluation",
+        "missingness_sweep",
     ):
         monkeypatch.setattr(
             pipeline,
@@ -160,7 +169,84 @@ def test_run_all_executes_shared_prerequisites_once(monkeypatch):
         "interval_evaluation",
         "model_c",
         "model_c_evaluation",
+        "missingness_sweep",
     ]
+
+
+def test_missingness_sweep_runs_fixed_rates_with_same_seeds_and_writes_outputs(
+    tmp_path, monkeypatch
+):
+    paths = _temporary_paths(tmp_path)
+    settings = replace(config.DEFAULT_RUN_SETTINGS, seed=17, n_split_seeds=3)
+    pipeline = EtaPipeline(settings, paths)
+    calls = []
+    plotted = []
+
+    def fake_run_to(run, target):
+        assert target == "evaluation"
+        calls.append((run.settings, run.paths))
+        run.paths.model_r_metrics.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "checkpoint": [1],
+                "model_mae_mean_h": [5.0 + run.settings.missing_rate],
+                "model_mae_std_h": [0.5],
+                "b2_mae_mean_h": [6.0],
+            }
+        ).to_csv(run.paths.model_r_metrics, index=False)
+
+    monkeypatch.setattr(EtaPipeline, "run_to", fake_run_to)
+    monkeypatch.setattr(
+        "src.pipeline.evaluate.plot_model_r_missingness_sweep",
+        lambda metrics, path: plotted.append((metrics.copy(), path)),
+    )
+
+    pipeline.build_missingness_sweep()
+
+    rates = [0.0, 0.1, 0.2, 0.3]
+    assert [run_settings.missing_rate for run_settings, _ in calls] == rates
+    assert all(run_settings.seed == settings.seed for run_settings, _ in calls)
+    assert all(
+        run_settings.split_seeds == settings.split_seeds for run_settings, _ in calls
+    )
+    assert all(not run_paths.model_r_metrics.exists() for _, run_paths in calls)
+    result = pd.read_csv(paths.model_r_missingness_sweep)
+    assert result["missing_rate"].tolist() == rates
+    assert result["b2_mae_mean_h"].tolist() == [6.0] * len(rates)
+    assert plotted[0][1] == paths.model_r_missingness_sweep_plot
+    assert plotted[0][0]["missing_rate"].tolist() == rates
+
+
+def test_missingness_sweep_cli_uses_out_directory(monkeypatch, capsys):
+    output_dir = Path("custom/output")
+    calls = []
+    monkeypatch.setattr(
+        EtaPipeline,
+        "run_to",
+        lambda self, target: calls.append(
+            (
+                target,
+                self.paths.model_r_missingness_sweep,
+                self.paths.model_r_missingness_sweep_plot,
+            )
+        ),
+    )
+
+    assert main(["eval-missingness", "--out", str(output_dir)]) == 0
+
+    assert calls == [
+        (
+            "missingness_sweep",
+            output_dir / "model_r_missingness_sweep.csv",
+            output_dir / "model_r_missingness_sweep.png",
+        )
+    ]
+    assert "eval-missingness pipeline completed" in capsys.readouterr().out
+
+
+def test_missingness_sweep_cli_rejects_rate_override(capsys):
+    assert main(["eval-missingness", "--rate", "0.2"]) == 1
+    assert "fixed" in capsys.readouterr().err
 
 
 def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
@@ -193,6 +279,8 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.model_c_reliability_by_group,
             paths.model_c_classification_metrics_by_group,
             paths.model_c_threshold_sweep_by_group,
+            paths.model_r_missingness_sweep,
+            paths.model_r_missingness_sweep_plot,
         )
     )
     assert (
@@ -218,6 +306,13 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     assert set(metrics["checkpoint"]) == set(range(7))
     assert metrics["model_rmse_mean_h"].ge(0).all()
     assert metrics["b2_p90_ae_mean_h"].ge(0).all()
+    sweep = pd.read_csv(paths.model_r_missingness_sweep)
+    assert set(sweep["missing_rate"]) == {0.0, 0.1, 0.2, 0.3}
+    assert set(sweep["checkpoint"]) == set(range(7))
+    assert sweep["b2_mae_mean_h"].ge(0).all()
+    assert paths.model_r_missingness_sweep_plot.read_bytes().startswith(
+        b"\x89PNG\r\n\x1a\n"
+    )
     grouped_metrics = pd.read_csv(paths.model_r_group_metrics)
     assert set(grouped_metrics["checkpoint"]) == set(range(7))
     assert set(grouped_metrics["group_type"]) == {

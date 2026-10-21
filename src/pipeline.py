@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal
 
 import pandas as pd
@@ -40,6 +41,7 @@ _PipelineStageName = Literal[
     "model_c",
     "interval_evaluation",
     "classification_evaluation",
+    "missingness_sweep",
 ]
 
 
@@ -77,12 +79,21 @@ class ArtifactPaths:
     model_c_threshold_sweep_by_group: Path = Path(
         "outputs/metrics/model_c_threshold_sweep_by_group.csv"
     )
+    model_r_missingness_sweep: Path = Path(
+        "outputs/metrics/model_r_missingness_sweep.csv"
+    )
+    model_r_missingness_sweep_plot: Path = Path(
+        "outputs/metrics/model_r_missingness_sweep.png"
+    )
 
 
 @dataclass(frozen=True)
 class _PipelineStage:
     builder: str
     prerequisites: tuple[_PipelineStageName, ...] = ()
+
+
+_MISSINGNESS_SWEEP_RATES = (0.0, 0.1, 0.2, 0.3)
 
 
 _PIPELINE_STAGES: dict[_PipelineStageName, _PipelineStage] = {
@@ -98,6 +109,7 @@ _PIPELINE_STAGES: dict[_PipelineStageName, _PipelineStage] = {
     "classification_evaluation": _PipelineStage(
         "build_model_c_evaluation", ("model_c",)
     ),
+    "missingness_sweep": _PipelineStage("build_missingness_sweep"),
 }
 
 
@@ -201,6 +213,14 @@ _CLI_TARGETS = {
             "model_c_reliability_by_group",
             "model_c_classification_metrics_by_group",
             "model_c_threshold_sweep_by_group",
+        ),
+    ),
+    "eval-missingness": _CliTarget(
+        stage="missingness_sweep",
+        path_args=("out",),
+        output_fields=(
+            "model_r_missingness_sweep",
+            "model_r_missingness_sweep_plot",
         ),
     ),
 }
@@ -428,6 +448,38 @@ class EtaPipeline:
             grouped_threshold_sweep, self.paths.model_c_threshold_sweep_by_group
         )
 
+    def build_missingness_sweep(self) -> None:
+        """Compare Model R with B2 at the fixed missingness rates."""
+        results = []
+        for rate in _MISSINGNESS_SWEEP_RATES:
+            with TemporaryDirectory(prefix=f"eta-missingness-{rate:g}-") as directory:
+                root = Path(directory)
+                paths = ArtifactPaths(
+                    raw_shipments=root / "shipments.csv",
+                    truth=root / "truth.csv",
+                    observed=root / "observed.csv",
+                    hidden_mask=root / "hidden_mask.csv",
+                    delays=root / "delays.csv",
+                    stacked=root / "stacked.parquet",
+                    splits=root / "splits.csv",
+                    baseline_predictions=root / "baseline_predictions.csv",
+                    model_r_predictions=root / "model_r.csv",
+                    model_r_metrics=root / "model_r_metrics.csv",
+                    model_r_group_metrics=root / "model_r_group_metrics.csv",
+                )
+                EtaPipeline(replace(self.settings, missing_rate=rate), paths).run_to(
+                    "evaluation"
+                )
+                results.append(
+                    _read_artifact(paths.model_r_metrics).assign(missing_rate=rate)
+                )
+
+        metrics = pd.concat(results, ignore_index=True)
+        evaluate.plot_model_r_missingness_sweep(
+            metrics, self.paths.model_r_missingness_sweep_plot
+        )
+        _write_artifact(metrics, self.paths.model_r_missingness_sweep)
+
     def run_to(self, target: _PipelineStageName) -> None:
         """Run the target's prerequisites once, without unrelated branches."""
         self._run_targets((target,))
@@ -452,7 +504,12 @@ class EtaPipeline:
     def run_all(self) -> None:
         """Run every implemented model and evaluation branch once."""
         self._run_targets(
-            ("evaluation", "interval_evaluation", "classification_evaluation")
+            (
+                "evaluation",
+                "interval_evaluation",
+                "classification_evaluation",
+                "missingness_sweep",
+            )
         )
 
 
@@ -527,6 +584,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point; expected pipeline failures are concise and non-zero."""
     args = _parser().parse_args(argv)
     try:
+        if args.target == "eval-missingness" and args.rate is not None:
+            raise ConfigurationError(
+                "eval-missingness uses fixed rates 0, 0.1, 0.2, and 0.3; "
+                "--rate is not supported"
+            )
         settings_updates = {
             key: value
             for key, value in (
