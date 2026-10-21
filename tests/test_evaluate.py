@@ -49,6 +49,12 @@ def test_model_r_comparison_reports_held_out_mae_by_checkpoint():
 
     assert comparison["model_mae_mean_h"] == pytest.approx(1.25)
     assert comparison["b2_mae_mean_h"] == pytest.approx(3.25)
+    assert comparison["model_median_ae_mean_h"] == pytest.approx(1.25)
+    assert comparison["b2_median_ae_mean_h"] == pytest.approx(3.25)
+    assert comparison["model_p90_ae_mean_h"] == pytest.approx(1.85)
+    assert comparison["b2_p90_ae_mean_h"] == pytest.approx(4.25)
+    assert comparison["model_rmse_mean_h"] == pytest.approx((2**0.5 + 2.5**0.5) / 2)
+    assert comparison["b2_rmse_mean_h"] == pytest.approx((16**0.5 + 12.5**0.5) / 2)
     assert comparison["model_beats_b2_seeds"] == 2
     assert comparison["n_split_seeds"] == 2
 

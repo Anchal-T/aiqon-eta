@@ -62,11 +62,10 @@ def _validated_prediction_keys(table: pd.DataFrame) -> pd.DataFrame:
     return table
 
 
-def compare_model_r_to_b2(
+def _paired_model_r_b2_predictions(
     model_predictions: pd.DataFrame,
     baseline_predictions: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Report held-out MAE mean and spread by checkpoint across split seeds."""
     missing_model = sorted(set(_MODEL_COLUMNS) - set(model_predictions.columns))
     if missing_model:
         raise ContractError(f"Model R predictions are missing columns: {missing_model}")
@@ -85,16 +84,15 @@ def compare_model_r_to_b2(
     if model.empty or baseline.empty:
         raise ContractError("Model R and B2 predictions must be non-empty")
 
-    model = _validated_prediction_keys(model)
-    baseline = _validated_prediction_keys(baseline)
-
-    model = model.rename(
+    model = _validated_prediction_keys(model).rename(
         columns={
             "actual_final_delay_h": "actual_h",
             "predicted_final_delay_h": "model_pred_h",
         }
     )
-    baseline = baseline.rename(columns={"predicted_final_delay_h": "b2_pred_h"})
+    baseline = _validated_prediction_keys(baseline).rename(
+        columns={"predicted_final_delay_h": "b2_pred_h"}
+    )
     joined = model.merge(baseline, on=list(_KEYS), how="outer", indicator=True)
     if not joined["_merge"].eq("both").all():
         unmatched_model = joined.loc[
@@ -114,19 +112,55 @@ def compare_model_r_to_b2(
         if values.isna().any() or not np.isfinite(values).all():
             raise ContractError(f"prediction column {column} must be finite numbers")
         joined[column] = values
+    return joined
+
+
+def _model_r_metrics_by_seed(joined: pd.DataFrame) -> pd.DataFrame:
     joined["model_error_h"] = (joined["actual_h"] - joined["model_pred_h"]).abs()
     joined["b2_error_h"] = (joined["actual_h"] - joined["b2_pred_h"]).abs()
-
+    joined["model_squared_error_h"] = (joined["actual_h"] - joined["model_pred_h"]) ** 2
+    joined["b2_squared_error_h"] = (joined["actual_h"] - joined["b2_pred_h"]) ** 2
     by_seed = joined.groupby(["split_seed", "checkpoint"], as_index=False).agg(
         model_mae_h=("model_error_h", "mean"),
+        model_median_ae_h=("model_error_h", "median"),
+        model_p90_ae_h=("model_error_h", lambda errors: errors.quantile(0.9)),
+        model_mse_h=("model_squared_error_h", "mean"),
         b2_mae_h=("b2_error_h", "mean"),
+        b2_median_ae_h=("b2_error_h", "median"),
+        b2_p90_ae_h=("b2_error_h", lambda errors: errors.quantile(0.9)),
+        b2_mse_h=("b2_squared_error_h", "mean"),
+    )
+    by_seed["model_rmse_h"] = np.sqrt(by_seed["model_mse_h"])
+    by_seed["b2_rmse_h"] = np.sqrt(by_seed["b2_mse_h"])
+    return by_seed
+
+
+def compare_model_r_to_b2(
+    model_predictions: pd.DataFrame,
+    baseline_predictions: pd.DataFrame,
+) -> pd.DataFrame:
+    """Report held-out regression errors by checkpoint across split seeds."""
+    by_seed = _model_r_metrics_by_seed(
+        _paired_model_r_b2_predictions(model_predictions, baseline_predictions)
     )
     by_seed["model_beats_b2"] = by_seed["model_mae_h"] < by_seed["b2_mae_h"]
     summary = by_seed.groupby("checkpoint", as_index=False).agg(
         model_mae_mean_h=("model_mae_h", "mean"),
         model_mae_std_h=("model_mae_h", "std"),
+        model_median_ae_mean_h=("model_median_ae_h", "mean"),
+        model_median_ae_std_h=("model_median_ae_h", "std"),
+        model_p90_ae_mean_h=("model_p90_ae_h", "mean"),
+        model_p90_ae_std_h=("model_p90_ae_h", "std"),
+        model_rmse_mean_h=("model_rmse_h", "mean"),
+        model_rmse_std_h=("model_rmse_h", "std"),
         b2_mae_mean_h=("b2_mae_h", "mean"),
         b2_mae_std_h=("b2_mae_h", "std"),
+        b2_median_ae_mean_h=("b2_median_ae_h", "mean"),
+        b2_median_ae_std_h=("b2_median_ae_h", "std"),
+        b2_p90_ae_mean_h=("b2_p90_ae_h", "mean"),
+        b2_p90_ae_std_h=("b2_p90_ae_h", "std"),
+        b2_rmse_mean_h=("b2_rmse_h", "mean"),
+        b2_rmse_std_h=("b2_rmse_h", "std"),
         model_beats_b2_seeds=("model_beats_b2", "sum"),
         n_split_seeds=("split_seed", "nunique"),
     )

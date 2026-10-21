@@ -197,6 +197,8 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     )
     metrics = pd.read_csv(paths.model_r_metrics)
     assert set(metrics["checkpoint"]) == set(range(7))
+    assert metrics["model_rmse_mean_h"].ge(0).all()
+    assert metrics["b2_p90_ae_mean_h"].ge(0).all()
     intervals = pd.read_csv(paths.model_q_predictions)
     assert (
         intervals["predicted_final_lower_h"] <= intervals["predicted_final_upper_h"]

@@ -30,8 +30,9 @@ To start from existing upstream artifacts, use:
 ```
 
 Model R predicts `remaining_delay_h` with an L1 LightGBM regressor and adds it
-to `delay_so_far`. Its held-out MAE is compared with B2 by checkpoint and split
-seed. Model Q fits 0.1 and 0.9 quantile regressors and reports held-out interval
+to `delay_so_far`. Its held-out MAE, median and P90 absolute error, and RMSE
+are compared with B2 by checkpoint across split seeds. Model Q fits 0.1 and
+0.9 quantile regressors and reports held-out interval
 coverage and width by checkpoint; crossed quantiles are ordered into interval
 bounds and flagged. Model C reports held-out Brier score, ROC-AUC, PR-AUC,
 F1 at 0.5, a threshold sweep from 0 to 1 in 0.05 steps, and a reliability
@@ -69,8 +70,9 @@ always there and the delivery is the target, so neither is ever touched.
 held-out prediction per split seed, shipment, checkpoint, and baseline. B0
 predicts zero delay, B1 predicts the journey mean from outer-training shipments,
 and B2 predicts `delay_so_far`. Model R predictions and its checkpoint-level
-B2 comparison are written to `outputs/predictions/model_r.csv` and
-`outputs/metrics/model_r_vs_b2.csv`. Model Q intervals and checkpoint coverage
+comparison with B2 (MAE, median/P90 absolute error, and RMSE) are written to
+`outputs/predictions/model_r.csv` and `outputs/metrics/model_r_vs_b2.csv`. Model
+Q intervals and checkpoint coverage
 metrics are written to `outputs/predictions/model_q.csv` and
 `outputs/metrics/model_q_coverage.csv`. Model C's held-out delay probabilities
 are written to `outputs/predictions/model_c.csv`. Its reliability-bin table
