@@ -12,15 +12,15 @@ what the model expects next.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-make all       # builds data, baselines, Model R, and comparison metrics
+make all       # builds data, baselines, Model R/Q, and their evaluations
 make test      # runs the test suite
 ```
 
-`make all` runs data generation, features, splits, held-out baselines, Model R,
-and its B2 comparison through the central `src.pipeline` orchestrator. The
-`make features`, `make splits`, `make baselines`, `make train`, and `make eval`
-targets build their prerequisites automatically. To start from existing upstream
-artifacts, use:
+`make all` runs data generation, features, splits, held-out baselines, Model R/Q,
+and their evaluations through the central `src.pipeline` orchestrator. The
+`make features`, `make splits`, `make baselines`, `make train`, `make eval`,
+`make train-q`, and `make eval-q` targets build their prerequisites automatically.
+To start from existing upstream artifacts, use:
 
 ```bash
 .venv/bin/python -m src.pipeline data --raw PATH
@@ -30,8 +30,10 @@ artifacts, use:
 
 Model R predicts `remaining_delay_h` with an L1 LightGBM regressor and adds it
 to `delay_so_far`. Its held-out MAE is compared with B2 by checkpoint and split
-seed. Quantile/classification models, the broader metric suite, and explanations
-remain future phases.
+seed. Model Q fits 0.1 and 0.9 quantile regressors and reports held-out interval
+coverage and width by checkpoint; crossed quantiles are ordered into interval
+bounds and flagged. Model C, broader metric cuts, missingness sweeps, and
+explanations remain future phases.
 
 ## The data
 
@@ -62,9 +64,11 @@ always there and the delivery is the target, so neither is ever touched.
 `make all` also writes `data/processed/baseline_predictions.csv`, with one
 held-out prediction per split seed, shipment, checkpoint, and baseline. B0
 predicts zero delay, B1 predicts the journey mean from outer-training shipments,
-and B2 predicts `delay_so_far`. Model R predictions and the checkpoint-level
+and B2 predicts `delay_so_far`. Model R predictions and its checkpoint-level
 B2 comparison are written to `outputs/predictions/model_r.csv` and
-`outputs/metrics/model_r_vs_b2.csv`.
+`outputs/metrics/model_r_vs_b2.csv`. Model Q intervals and checkpoint coverage
+metrics are written to `outputs/predictions/model_q.csv` and
+`outputs/metrics/model_q_coverage.csv`.
 
 The random draws behind the holes are made once per cell and thresholded by
 the rate, so the hidden sets nest: the cells hidden at rate 0.1 are a subset
@@ -115,8 +119,8 @@ src/checkpoints.py checkpoint visibility rules
 src/features.py   checkpoint-stacked feature and target transform
 src/splits.py     repeated shipment-level train/test and CV assignments
 src/baselines.py  held-out B0, B1, and B2 reference predictions
-src/models.py     Model R with grouped-fold early stopping
-src/evaluate.py   held-out Model R versus B2 MAE by checkpoint
+src/models.py     Model R and Model Q with grouped-fold early stopping
+src/evaluate.py   held-out Model R MAE and Model Q interval metrics
 tests/            data contracts, arithmetic, leakage, splits, and model checks
 data/raw/         generated data
 data/interim/     observed logs, the mask, and the delay table

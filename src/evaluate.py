@@ -10,6 +10,37 @@ from src.errors import ContractError
 _KEYS = ("split_seed", "shipment_id", "checkpoint")
 _MODEL_COLUMNS = (*_KEYS, "actual_final_delay_h", "predicted_final_delay_h")
 _BASELINE_COLUMNS = (*_KEYS, "baseline", "predicted_final_delay_h")
+_Q_COLUMNS = (
+    *_KEYS,
+    "actual_final_delay_h",
+    "predicted_final_lower_h",
+    "predicted_final_upper_h",
+    "quantiles_crossed",
+)
+
+
+def _validated_prediction_keys(table: pd.DataFrame) -> pd.DataFrame:
+    if table[list(_KEYS)].isna().any().any():
+        raise ContractError("prediction seed, shipment ID, and checkpoint are required")
+    table["shipment_id"] = table["shipment_id"].astype("string")
+    seeds = pd.to_numeric(table["split_seed"], errors="coerce")
+    checkpoints = pd.to_numeric(table["checkpoint"], errors="coerce")
+    if (
+        seeds.isna().any()
+        or not np.isfinite(seeds).all()
+        or (seeds % 1 != 0).any()
+        or checkpoints.isna().any()
+        or not np.isfinite(checkpoints).all()
+        or (checkpoints % 1 != 0).any()
+    ):
+        raise ContractError("prediction seeds and checkpoints must be finite integers")
+    table["split_seed"] = seeds.astype("int64")
+    table["checkpoint"] = checkpoints.astype("int64")
+    if table.duplicated(list(_KEYS)).any():
+        raise ContractError(
+            "each prediction must be unique per seed, shipment, checkpoint"
+        )
+    return table
 
 
 def compare_model_r_to_b2(
@@ -35,32 +66,8 @@ def compare_model_r_to_b2(
     if model.empty or baseline.empty:
         raise ContractError("Model R and B2 predictions must be non-empty")
 
-    for table in (model, baseline):
-        if table[list(_KEYS)].isna().any().any():
-            raise ContractError(
-                "prediction seed, shipment ID, and checkpoint are required"
-            )
-        table["shipment_id"] = table["shipment_id"].astype("string")
-        seeds = pd.to_numeric(table["split_seed"], errors="coerce")
-        checkpoints = pd.to_numeric(table["checkpoint"], errors="coerce")
-        if (
-            seeds.isna().any()
-            or not np.isfinite(seeds).all()
-            or (seeds % 1 != 0).any()
-            or checkpoints.isna().any()
-            or not np.isfinite(checkpoints).all()
-            or (checkpoints % 1 != 0).any()
-        ):
-            raise ContractError(
-                "prediction seeds and checkpoints must be finite integers"
-            )
-        table["split_seed"] = seeds.astype("int64")
-        table["checkpoint"] = checkpoints.astype("int64")
-
-    if model.duplicated(list(_KEYS)).any() or baseline.duplicated(list(_KEYS)).any():
-        raise ContractError(
-            "each prediction must be unique per seed, shipment, checkpoint"
-        )
+    model = _validated_prediction_keys(model)
+    baseline = _validated_prediction_keys(baseline)
 
     model = model.rename(
         columns={
@@ -110,3 +117,66 @@ def compare_model_r_to_b2(
         np.nan,
     )
     return summary
+
+
+def evaluate_model_q_intervals(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Report 80% interval coverage, width, and quantile crossings by checkpoint."""
+    missing = sorted(set(_Q_COLUMNS) - set(predictions.columns))
+    if missing:
+        raise ContractError(f"Model Q predictions are missing columns: {missing}")
+    if predictions.empty:
+        raise ContractError("Model Q predictions must be non-empty")
+
+    table = _validated_prediction_keys(predictions[list(_Q_COLUMNS)].copy())
+    for column in (
+        "actual_final_delay_h",
+        "predicted_final_lower_h",
+        "predicted_final_upper_h",
+    ):
+        values = pd.to_numeric(table[column], errors="coerce")
+        if values.isna().any() or not np.isfinite(values).all():
+            raise ContractError(f"Model Q prediction column {column} must be finite")
+        table[column] = values
+    if not pd.api.types.is_bool_dtype(table["quantiles_crossed"]):
+        raise ContractError("Model Q quantiles_crossed values must be boolean")
+    if table["quantiles_crossed"].isna().any():
+        raise ContractError("Model Q quantiles_crossed values must be present")
+    if (table["predicted_final_lower_h"] > table["predicted_final_upper_h"]).any():
+        raise ContractError(
+            "Model Q interval lower bounds must not exceed upper bounds"
+        )
+
+    table["covered"] = table["actual_final_delay_h"].between(
+        table["predicted_final_lower_h"],
+        table["predicted_final_upper_h"],
+        inclusive="both",
+    )
+    table["interval_width_h"] = (
+        table["predicted_final_upper_h"] - table["predicted_final_lower_h"]
+    )
+    by_seed = table.groupby(["split_seed", "checkpoint"], as_index=False).agg(
+        coverage=("covered", "mean"),
+        mean_width_h=("interval_width_h", "mean"),
+        quantile_crossing_rate=("quantiles_crossed", "mean"),
+    )
+    summary = by_seed.groupby("checkpoint", as_index=False).agg(
+        coverage_mean=("coverage", "mean"),
+        coverage_std=("coverage", "std"),
+        mean_width_h=("mean_width_h", "mean"),
+        mean_width_std_h=("mean_width_h", "std"),
+        quantile_crossing_rate=("quantile_crossing_rate", "mean"),
+        n_split_seeds=("split_seed", "nunique"),
+    )
+    summary["nominal_coverage"] = 0.8
+    return summary[
+        [
+            "checkpoint",
+            "nominal_coverage",
+            "coverage_mean",
+            "coverage_std",
+            "mean_width_h",
+            "mean_width_std_h",
+            "quantile_crossing_rate",
+            "n_split_seeds",
+        ]
+    ]

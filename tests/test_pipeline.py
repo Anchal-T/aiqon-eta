@@ -24,6 +24,8 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         baseline_predictions=tmp_path / "processed" / "baseline_predictions.csv",
         model_r_predictions=tmp_path / "outputs" / "predictions" / "model_r.csv",
         model_r_metrics=tmp_path / "outputs" / "metrics" / "model_r_vs_b2.csv",
+        model_q_predictions=tmp_path / "outputs" / "predictions" / "model_q.csv",
+        model_q_metrics=tmp_path / "outputs" / "metrics" / "model_q_coverage.csv",
     )
 
 
@@ -44,6 +46,57 @@ def test_run_to_evaluation_executes_each_stage_once(monkeypatch):
     assert calls == ["data", "features", "splits", "baselines", "model_r", "evaluation"]
 
 
+def test_model_q_target_skips_baseline_and_point_model(monkeypatch):
+    pipeline = EtaPipeline()
+    calls = []
+    monkeypatch.setattr(pipeline, "build_data", lambda: calls.append("data"))
+    monkeypatch.setattr(pipeline, "build_features", lambda: calls.append("features"))
+    monkeypatch.setattr(pipeline, "build_splits", lambda: calls.append("splits"))
+    monkeypatch.setattr(pipeline, "build_baselines", lambda: calls.append("baselines"))
+    monkeypatch.setattr(pipeline, "build_model_r", lambda: calls.append("model_r"))
+    monkeypatch.setattr(
+        pipeline, "build_evaluation", lambda: calls.append("evaluation")
+    )
+    monkeypatch.setattr(pipeline, "build_model_q", lambda: calls.append("model_q"))
+
+    pipeline.run_to("model_q")
+
+    assert calls == ["data", "features", "splits", "model_q"]
+
+
+def test_run_all_executes_shared_prerequisites_once(monkeypatch):
+    pipeline = EtaPipeline()
+    calls = []
+    for stage in (
+        "data",
+        "features",
+        "splits",
+        "baselines",
+        "model_r",
+        "evaluation",
+        "model_q",
+        "interval_evaluation",
+    ):
+        monkeypatch.setattr(
+            pipeline,
+            f"build_{stage}",
+            lambda stage=stage: calls.append(stage),
+        )
+
+    pipeline.run_all()
+
+    assert calls == [
+        "data",
+        "features",
+        "splits",
+        "baselines",
+        "model_r",
+        "evaluation",
+        "model_q",
+        "interval_evaluation",
+    ]
+
+
 def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     paths = _temporary_paths(tmp_path)
 
@@ -62,6 +115,8 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.baseline_predictions,
             paths.model_r_predictions,
             paths.model_r_metrics,
+            paths.model_q_predictions,
+            paths.model_q_metrics,
         )
     )
     assert (
@@ -85,6 +140,25 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     )
     metrics = pd.read_csv(paths.model_r_metrics)
     assert set(metrics["checkpoint"]) == set(range(7))
+    intervals = pd.read_csv(paths.model_q_predictions)
+    assert (
+        intervals["predicted_final_lower_h"] <= intervals["predicted_final_upper_h"]
+    ).all()
+    np.testing.assert_allclose(
+        intervals["predicted_final_lower_h"],
+        intervals["delay_so_far"] + intervals["predicted_remaining_lower_h"],
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        intervals["predicted_final_upper_h"],
+        intervals["delay_so_far"] + intervals["predicted_remaining_upper_h"],
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    interval_metrics = pd.read_csv(paths.model_q_metrics)
+    assert set(interval_metrics["checkpoint"]) == set(range(7))
+    assert (interval_metrics["mean_width_h"] >= 0).all()
 
 
 def test_artifact_read_error_includes_path_and_cause(tmp_path):
