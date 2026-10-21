@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from src import config, features
+from src import config, features, splits
 from src.errors import ConfigurationError, ContractError, ModelError, SplitError
 
 MODEL_R_PREDICTION_COLUMNS = (
@@ -32,7 +33,7 @@ MODEL_Q_PREDICTION_COLUMNS = (
     "predicted_final_upper_h",
     "quantiles_crossed",
 )
-_REQUIRED_SPLITS = ("split_seed", "shipment_id", "outer_split", "fold")
+
 _QUANTILES = (0.1, 0.9)
 
 
@@ -86,26 +87,11 @@ def _validated_rows(stacked: pd.DataFrame) -> pd.DataFrame:
 
 
 def _validated_splits(split_manifest: pd.DataFrame) -> pd.DataFrame:
-    missing = sorted(set(_REQUIRED_SPLITS) - set(split_manifest.columns))
-    if missing:
-        raise ContractError(f"split manifest is missing model columns: {missing}")
-    if split_manifest.empty:
-        raise ContractError("split manifest has no model assignments")
+    assignments = splits.validate_assignments(split_manifest)
+    if "fold" not in split_manifest.columns:
+        raise ContractError("split manifest is missing model columns: ['fold']")
 
-    assignments = split_manifest[list(_REQUIRED_SPLITS)].copy()
-    if assignments[["shipment_id", "outer_split"]].isna().any().any():
-        raise ContractError("split shipment IDs and outer splits must be present")
-    assignments["shipment_id"] = assignments["shipment_id"].astype("string")
-    seeds = pd.to_numeric(assignments["split_seed"], errors="coerce")
-    if seeds.isna().any() or not np.isfinite(seeds).all() or (seeds % 1 != 0).any():
-        raise ContractError("split seeds must be finite integers")
-    assignments["split_seed"] = seeds.astype("int64")
-    if assignments.duplicated(["split_seed", "shipment_id"]).any():
-        raise ContractError("each shipment must have one split assignment per seed")
-    if not assignments["outer_split"].isin(("train", "test")).all():
-        raise ContractError("outer_split values must be 'train' or 'test'")
-
-    folds = pd.to_numeric(assignments["fold"], errors="coerce")
+    folds = pd.to_numeric(split_manifest["fold"], errors="coerce")
     is_training = assignments["outer_split"] == "train"
     if folds[is_training].isna().any() or folds[~is_training].notna().any():
         raise ContractError("training rows need folds and test rows must not have them")
@@ -115,14 +101,19 @@ def _validated_splits(split_manifest: pd.DataFrame) -> pd.DataFrame:
     return assignments
 
 
-def _new_estimator(
-    seed: int,
-    n_estimators: int,
-    objective: str,
-    alpha: float | None = None,
-) -> lgb.LGBMRegressor:
+@dataclass(frozen=True)
+class _FitSpec:
+    model_name: str
+    objective: str
+    eval_metric: str
+    max_estimators: int
+    early_stopping_rounds: int
+    alpha: float | None = None
+
+
+def _new_estimator(seed: int, n_estimators: int, spec: _FitSpec) -> lgb.LGBMRegressor:
     options = {
-        "objective": objective,
+        "objective": spec.objective,
         "n_estimators": n_estimators,
         "num_leaves": 8,
         "min_child_samples": 15,
@@ -132,94 +123,107 @@ def _new_estimator(
         "n_jobs": 1,
         "verbosity": -1,
     }
-    if alpha is not None:
-        options["alpha"] = alpha
+    if spec.alpha is not None:
+        options["alpha"] = spec.alpha
     return lgb.LGBMRegressor(**options)
+
+
+def _rows_for_seed(
+    rows: pd.DataFrame,
+    seed_assignments: pd.DataFrame,
+    seed: int,
+    settings: config.RunSettings,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    expected_ids = set(rows["shipment_id"])
+    assigned_ids = set(seed_assignments["shipment_id"])
+    if assigned_ids != expected_ids:
+        missing = sorted(expected_ids - assigned_ids)
+        unexpected = sorted(assigned_ids - expected_ids)
+        raise ContractError(
+            f"split seed {seed} shipment IDs do not match stacked data; "
+            f"missing: {missing[:5]}, unexpected: {unexpected[:5]}"
+        )
+
+    assigned_rows = rows.merge(
+        seed_assignments, on="shipment_id", how="left", validate="many_to_one"
+    )
+    training = assigned_rows[assigned_rows["outer_split"] == "train"]
+    testing = assigned_rows[assigned_rows["outer_split"] == "test"]
+    if training.empty or testing.empty:
+        raise SplitError(f"split seed {seed} must have train and test rows")
+    folds = training["fold"].astype(int)
+    if set(folds.unique()) != set(range(settings.cv_folds)):
+        raise SplitError(f"split seed {seed} does not contain all configured CV folds")
+    return training, testing
+
+
+def _best_iteration(
+    training: pd.DataFrame,
+    seed: int,
+    fold: int,
+    spec: _FitSpec,
+) -> int:
+    fold_train = training[training["fold"] != fold]
+    fold_valid = training[training["fold"] == fold]
+    if fold_train.empty or fold_valid.empty:
+        raise SplitError(f"split seed {seed} has an empty CV fold {fold}")
+
+    estimator = _new_estimator(seed, spec.max_estimators, spec)
+    try:
+        estimator.fit(
+            fold_train.loc[:, features.FEATURE_COLUMNS],
+            fold_train["remaining_delay_h"],
+            eval_X=fold_valid.loc[:, features.FEATURE_COLUMNS],
+            eval_y=fold_valid["remaining_delay_h"],
+            eval_metric=spec.eval_metric,
+            categorical_feature=list(features.CATEGORICAL_FEATURES),
+            callbacks=[lgb.early_stopping(spec.early_stopping_rounds, verbose=False)],
+        )
+    except (ValueError, lgb.basic.LightGBMError) as error:
+        raise ModelError(
+            f"{spec.model_name} failed for split seed {seed}, CV fold {fold}: {error}"
+        ) from error
+    return estimator.best_iteration_ or spec.max_estimators
+
+
+def _fit_final_model(
+    training: pd.DataFrame,
+    seed: int,
+    n_estimators: int,
+    spec: _FitSpec,
+) -> lgb.LGBMRegressor:
+    estimator = _new_estimator(seed, n_estimators, spec)
+    try:
+        estimator.fit(
+            training.loc[:, features.FEATURE_COLUMNS],
+            training["remaining_delay_h"],
+            categorical_feature=list(features.CATEGORICAL_FEATURES),
+        )
+    except (ValueError, lgb.basic.LightGBMError) as error:
+        raise ModelError(
+            f"{spec.model_name} failed to fit split seed {seed}: {error}"
+        ) from error
+    return estimator
 
 
 def _fit_grouped_models(
     rows: pd.DataFrame,
     assignments: pd.DataFrame,
     settings: config.RunSettings,
-    *,
-    objective: str,
-    eval_metric: str,
-    model_name: str,
-    max_estimators: int,
-    early_stopping_rounds: int,
-    alpha: float | None = None,
+    spec: _FitSpec,
 ) -> tuple[dict[int, lgb.LGBMRegressor], dict[int, pd.DataFrame]]:
-    expected_ids = set(rows["shipment_id"])
     fitted_models: dict[int, lgb.LGBMRegressor] = {}
     test_rows_by_seed: dict[int, pd.DataFrame] = {}
 
     for seed_value, seed_assignments in assignments.groupby("split_seed", sort=False):
         seed = int(seed_value)
-        assigned_ids = set(seed_assignments["shipment_id"])
-        if assigned_ids != expected_ids:
-            missing = sorted(expected_ids - assigned_ids)
-            unexpected = sorted(assigned_ids - expected_ids)
-            raise ContractError(
-                f"split seed {seed} shipment IDs do not match stacked data; "
-                f"missing: {missing[:5]}, unexpected: {unexpected[:5]}"
-            )
-
-        assigned_rows = rows.merge(
-            seed_assignments, on="shipment_id", how="left", validate="many_to_one"
-        )
-        training = assigned_rows[assigned_rows["outer_split"] == "train"]
-        testing = assigned_rows[assigned_rows["outer_split"] == "test"]
-        if training.empty or testing.empty:
-            raise SplitError(f"split seed {seed} must have train and test rows")
-        folds = training["fold"].astype(int)
-        if set(folds.unique()) != set(range(settings.cv_folds)):
-            raise SplitError(
-                f"split seed {seed} does not contain all configured CV folds"
-            )
-
-        best_iterations = []
-        for fold in range(settings.cv_folds):
-            fold_train = training[training["fold"] != fold]
-            fold_valid = training[training["fold"] == fold]
-            if fold_train.empty or fold_valid.empty:
-                raise SplitError(f"split seed {seed} has an empty CV fold {fold}")
-            estimator = _new_estimator(
-                seed, max_estimators, objective=objective, alpha=alpha
-            )
-            try:
-                estimator.fit(
-                    fold_train.loc[:, features.FEATURE_COLUMNS],
-                    fold_train["remaining_delay_h"],
-                    eval_X=fold_valid.loc[:, features.FEATURE_COLUMNS],
-                    eval_y=fold_valid["remaining_delay_h"],
-                    eval_metric=eval_metric,
-                    categorical_feature=list(features.CATEGORICAL_FEATURES),
-                    callbacks=[
-                        lgb.early_stopping(early_stopping_rounds, verbose=False)
-                    ],
-                )
-            except (ValueError, lgb.basic.LightGBMError) as error:
-                raise ModelError(
-                    f"{model_name} failed for split seed {seed}, CV fold {fold}: {error}"
-                ) from error
-            best_iterations.append(estimator.best_iteration_ or max_estimators)
-
-        final_iterations = max(1, int(np.median(best_iterations)))
-        final_model = _new_estimator(
-            seed, final_iterations, objective=objective, alpha=alpha
-        )
-        try:
-            final_model.fit(
-                training.loc[:, features.FEATURE_COLUMNS],
-                training["remaining_delay_h"],
-                categorical_feature=list(features.CATEGORICAL_FEATURES),
-            )
-        except (ValueError, lgb.basic.LightGBMError) as error:
-            raise ModelError(
-                f"{model_name} failed to fit split seed {seed}: {error}"
-            ) from error
-
-        fitted_models[seed] = final_model
+        training, testing = _rows_for_seed(rows, seed_assignments, seed, settings)
+        iterations = [
+            _best_iteration(training, seed, fold, spec)
+            for fold in range(settings.cv_folds)
+        ]
+        n_estimators = max(1, int(np.median(iterations)))
+        fitted_models[seed] = _fit_final_model(training, seed, n_estimators, spec)
         test_rows_by_seed[seed] = testing[
             ["shipment_id", "final_delay_h", *features.FEATURE_COLUMNS]
         ].copy()
@@ -272,11 +276,13 @@ class ModelR:
             rows,
             assignments,
             self.settings,
-            objective="regression_l1",
-            eval_metric="l1",
-            model_name="Model R",
-            max_estimators=self.max_estimators,
-            early_stopping_rounds=self.early_stopping_rounds,
+            _FitSpec(
+                model_name="Model R",
+                objective="regression_l1",
+                eval_metric="l1",
+                max_estimators=self.max_estimators,
+                early_stopping_rounds=self.early_stopping_rounds,
+            ),
         )
         return self
 
@@ -345,12 +351,14 @@ class ModelQ:
                 rows,
                 assignments,
                 self.settings,
-                objective="quantile",
-                eval_metric="quantile",
-                model_name=f"Model Q (q={alpha})",
-                max_estimators=self.max_estimators,
-                early_stopping_rounds=self.early_stopping_rounds,
-                alpha=alpha,
+                _FitSpec(
+                    model_name=f"Model Q (q={alpha})",
+                    objective="quantile",
+                    eval_metric="quantile",
+                    max_estimators=self.max_estimators,
+                    early_stopping_rounds=self.early_stopping_rounds,
+                    alpha=alpha,
+                ),
             )
             models_by_quantile[alpha] = fitted
             if not test_rows_by_seed:

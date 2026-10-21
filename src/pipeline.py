@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Literal
 
 import pandas as pd
 import pyarrow as pa
@@ -26,6 +27,17 @@ from src import (
 )
 from src.errors import ArtifactError, ConfigurationError, PipelineError
 
+_PipelineStageName = Literal[
+    "data",
+    "features",
+    "splits",
+    "baselines",
+    "model_r",
+    "evaluation",
+    "model_q",
+    "interval_evaluation",
+]
+
 
 @dataclass(frozen=True)
 class ArtifactPaths:
@@ -43,6 +55,94 @@ class ArtifactPaths:
     model_r_metrics: Path = Path("outputs/metrics/model_r_vs_b2.csv")
     model_q_predictions: Path = Path("outputs/predictions/model_q.csv")
     model_q_metrics: Path = Path("outputs/metrics/model_q_coverage.csv")
+
+
+@dataclass(frozen=True)
+class _PipelineStage:
+    builder: str
+    prerequisites: tuple[_PipelineStageName, ...] = ()
+
+
+_PIPELINE_STAGES: dict[_PipelineStageName, _PipelineStage] = {
+    "data": _PipelineStage("build_data"),
+    "features": _PipelineStage("build_features", ("data",)),
+    "splits": _PipelineStage("build_splits", ("features",)),
+    "baselines": _PipelineStage("build_baselines", ("splits",)),
+    "model_r": _PipelineStage("build_model_r", ("splits",)),
+    "evaluation": _PipelineStage("build_evaluation", ("baselines", "model_r")),
+    "model_q": _PipelineStage("build_model_q", ("splits",)),
+    "interval_evaluation": _PipelineStage("build_interval_evaluation", ("model_q",)),
+}
+
+
+@dataclass(frozen=True)
+class _CliTarget:
+    stage: _PipelineStageName | None
+    path_args: tuple[str, ...] = ()
+    explicit_method: str | None = None
+    explicit_inputs: tuple[str, ...] = ()
+    output_fields: tuple[str, ...] = ()
+
+
+_CLI_TARGETS = {
+    "all": _CliTarget(stage=None),
+    "data": _CliTarget(
+        stage="data",
+        path_args=("raw", "out"),
+        explicit_method="build_data",
+        explicit_inputs=("raw",),
+        output_fields=("raw_shipments", "truth"),
+    ),
+    "features": _CliTarget(
+        stage="features",
+        path_args=("observed", "delays", "out"),
+        explicit_method="build_features",
+        explicit_inputs=("observed", "delays"),
+        output_fields=("stacked",),
+    ),
+    "splits": _CliTarget(
+        stage="splits",
+        path_args=("stacked", "out"),
+        explicit_method="build_splits",
+        explicit_inputs=("stacked",),
+        output_fields=("splits",),
+    ),
+    "baselines": _CliTarget(
+        stage="baselines",
+        path_args=("stacked", "splits", "out"),
+        explicit_method="build_baselines",
+        explicit_inputs=("stacked", "splits"),
+        output_fields=("baseline_predictions",),
+    ),
+    "model-r": _CliTarget(
+        stage="model_r",
+        path_args=("stacked", "splits", "out"),
+        explicit_method="build_model_r",
+        explicit_inputs=("stacked", "splits"),
+        output_fields=("model_r_predictions",),
+    ),
+    "eval": _CliTarget(
+        stage="evaluation",
+        path_args=("model-r", "baselines", "out"),
+        explicit_method="build_evaluation",
+        explicit_inputs=("model_r", "baselines"),
+        output_fields=("model_r_metrics",),
+    ),
+    "model-q": _CliTarget(
+        stage="model_q",
+        path_args=("stacked", "splits", "out"),
+        explicit_method="build_model_q",
+        explicit_inputs=("stacked", "splits"),
+        output_fields=("model_q_predictions",),
+    ),
+    "eval-q": _CliTarget(
+        stage="interval_evaluation",
+        path_args=("model-q", "out"),
+        explicit_method="build_interval_evaluation",
+        explicit_inputs=("model_q",),
+        output_fields=("model_q_metrics",),
+    ),
+}
 
 
 class EtaPipeline:
@@ -165,56 +265,22 @@ class EtaPipeline:
         metrics = evaluate.evaluate_model_q_intervals(predictions)
         _write_artifact(metrics, self.paths.model_q_metrics)
 
-    def run_to(
-        self,
-        target: Literal[
-            "data",
-            "features",
-            "splits",
-            "baselines",
-            "model_r",
-            "evaluation",
-            "model_q",
-            "interval_evaluation",
-        ],
-    ) -> None:
+    def run_to(self, target: _PipelineStageName) -> None:
         """Run the target's prerequisites once, without unrelated branches."""
         self._run_targets((target,))
 
-    def _run_targets(self, targets: tuple[str, ...]) -> None:
-        builders = {
-            "data": self.build_data,
-            "features": self.build_features,
-            "splits": self.build_splits,
-            "baselines": self.build_baselines,
-            "model_r": self.build_model_r,
-            "evaluation": self.build_evaluation,
-            "model_q": self.build_model_q,
-            "interval_evaluation": self.build_interval_evaluation,
-        }
-        prerequisites = {
-            "data": (),
-            "features": ("data",),
-            "splits": ("features",),
-            "baselines": ("splits",),
-            "model_r": ("splits",),
-            "evaluation": ("baselines", "model_r"),
-            "model_q": ("splits",),
-            "interval_evaluation": ("model_q",),
-        }
+    def _run_targets(self, targets: tuple[_PipelineStageName, ...]) -> None:
         completed: set[str] = set()
 
-        def build(stage: str) -> None:
-            try:
-                build_stage = builders[stage]
-                stage_prerequisites = prerequisites[stage]
-            except KeyError as error:
-                raise ConfigurationError(f"unknown pipeline target: {stage}") from error
+        def build(stage: _PipelineStageName) -> None:
+            stage_spec = _PIPELINE_STAGES.get(stage)
+            if stage_spec is None:
+                raise ConfigurationError(f"unknown pipeline target: {stage}")
             if stage in completed:
                 return
-            for prerequisite in stage_prerequisites:
+            for prerequisite in stage_spec.prerequisites:
                 build(prerequisite)
-            build_stage()
+            getattr(self, stage_spec.builder)()
             completed.add(stage)
 
         for target in targets:
@@ -268,112 +334,28 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build ETA pipeline artifacts.")
     subparsers = parser.add_subparsers(dest="target", required=True)
 
-    for target in (
-        "all",
-        "data",
-        "features",
-        "splits",
-        "baselines",
-        "model-r",
-        "eval",
-        "model-q",
-        "eval-q",
-    ):
+    for target, spec in _CLI_TARGETS.items():
         command = subparsers.add_parser(target)
         command.add_argument("--seed", type=int)
         command.add_argument("--n-shipments", type=int)
         command.add_argument("--rate", type=float)
-        if target == "data":
-            command.add_argument("--raw", type=Path)
-            command.add_argument("--out", type=Path)
-        elif target == "features":
-            command.add_argument("--observed", type=Path)
-            command.add_argument("--delays", type=Path)
-            command.add_argument("--out", type=Path)
-        elif target == "splits":
-            command.add_argument("--stacked", type=Path)
-            command.add_argument("--out", type=Path)
-        elif target == "baselines":
-            command.add_argument("--stacked", type=Path)
-            command.add_argument("--splits", type=Path)
-            command.add_argument("--out", type=Path)
-        elif target == "model-r":
-            command.add_argument("--stacked", type=Path)
-            command.add_argument("--splits", type=Path)
-            command.add_argument("--out", type=Path)
-        elif target == "eval":
-            command.add_argument("--model-r", type=Path)
-            command.add_argument("--baselines", type=Path)
-            command.add_argument("--out", type=Path)
-        elif target == "model-q":
-            command.add_argument("--stacked", type=Path)
-            command.add_argument("--splits", type=Path)
-            command.add_argument("--out", type=Path)
-        elif target == "eval-q":
-            command.add_argument("--model-q", type=Path)
-            command.add_argument("--out", type=Path)
+        for argument in spec.path_args:
+            command.add_argument(f"--{argument}", type=Path)
 
     return parser
 
 
 def _run_target(pipeline: EtaPipeline, args: argparse.Namespace) -> None:
-    default_actions = {
-        "all": pipeline.run_all,
-        "data": lambda: pipeline.run_to("data"),
-        "features": lambda: pipeline.run_to("features"),
-        "splits": lambda: pipeline.run_to("splits"),
-        "baselines": lambda: pipeline.run_to("baselines"),
-        "model-r": lambda: pipeline.run_to("model_r"),
-        "eval": lambda: pipeline.run_to("evaluation"),
-        "model-q": lambda: pipeline.run_to("model_q"),
-        "eval-q": lambda: pipeline.run_to("interval_evaluation"),
-    }
-    explicit_actions = {
-        "data": (
-            getattr(args, "raw", None) is not None,
-            lambda: pipeline.build_data(args.raw),
-        ),
-        "features": (
-            getattr(args, "observed", None) is not None
-            or getattr(args, "delays", None) is not None,
-            lambda: pipeline.build_features(args.observed, args.delays),
-        ),
-        "splits": (
-            getattr(args, "stacked", None) is not None,
-            lambda: pipeline.build_splits(args.stacked),
-        ),
-        "baselines": (
-            getattr(args, "stacked", None) is not None
-            or getattr(args, "splits", None) is not None,
-            lambda: pipeline.build_baselines(args.stacked, args.splits),
-        ),
-        "model-r": (
-            getattr(args, "stacked", None) is not None
-            or getattr(args, "splits", None) is not None,
-            lambda: pipeline.build_model_r(args.stacked, args.splits),
-        ),
-        "eval": (
-            getattr(args, "model_r", None) is not None
-            or getattr(args, "baselines", None) is not None,
-            lambda: pipeline.build_evaluation(args.model_r, args.baselines),
-        ),
-        "model-q": (
-            getattr(args, "stacked", None) is not None
-            or getattr(args, "splits", None) is not None,
-            lambda: pipeline.build_model_q(args.stacked, args.splits),
-        ),
-        "eval-q": (
-            getattr(args, "model_q", None) is not None,
-            lambda: pipeline.build_interval_evaluation(args.model_q),
-        ),
-    }
-    use_explicit_input, explicit_action = explicit_actions.get(
-        args.target, (False, None)
-    )
-    if use_explicit_input and explicit_action is not None:
-        explicit_action()
+    spec = _CLI_TARGETS[args.target]
+    if spec.stage is None:
+        pipeline.run_all()
+    elif spec.explicit_method and any(
+        getattr(args, name) is not None for name in spec.explicit_inputs
+    ):
+        inputs = (getattr(args, name) for name in spec.explicit_inputs)
+        getattr(pipeline, spec.explicit_method)(*inputs)
     else:
-        default_actions[args.target]()
+        pipeline.run_to(spec.stage)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -392,40 +374,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = replace(config.DEFAULT_RUN_SETTINGS, **settings_updates)
         paths = ArtifactPaths()
 
-        if args.target == "data" and args.out is not None and args.raw is None:
+        target_spec = _CLI_TARGETS[args.target]
+        if (
+            target_spec.output_fields
+            and getattr(args, "out", None) is not None
+            and (args.target != "data" or args.raw is None)
+        ):
             paths = replace(
                 paths,
-                raw_shipments=args.out / paths.raw_shipments.name,
-                truth=args.out / paths.truth.name,
-            )
-        elif args.target == "features" and args.out is not None:
-            paths = replace(paths, stacked=args.out / paths.stacked.name)
-        elif args.target == "splits" and args.out is not None:
-            paths = replace(paths, splits=args.out / paths.splits.name)
-        elif args.target == "baselines" and args.out is not None:
-            paths = replace(
-                paths,
-                baseline_predictions=args.out / paths.baseline_predictions.name,
-            )
-        elif args.target == "model-r" and args.out is not None:
-            paths = replace(
-                paths,
-                model_r_predictions=args.out / paths.model_r_predictions.name,
-            )
-        elif args.target == "eval" and args.out is not None:
-            paths = replace(
-                paths,
-                model_r_metrics=args.out / paths.model_r_metrics.name,
-            )
-        elif args.target == "model-q" and args.out is not None:
-            paths = replace(
-                paths,
-                model_q_predictions=args.out / paths.model_q_predictions.name,
-            )
-        elif args.target == "eval-q" and args.out is not None:
-            paths = replace(
-                paths,
-                model_q_metrics=args.out / paths.model_q_metrics.name,
+                **{
+                    field: args.out / getattr(paths, field).name
+                    for field in target_spec.output_fields
+                },
             )
 
         pipeline = EtaPipeline(settings, paths)

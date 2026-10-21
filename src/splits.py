@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedGroupKFold, train_test_split
 
@@ -9,6 +10,30 @@ from src import config
 from src.errors import ContractError, SplitError
 
 SPLIT_COLUMNS = ("split_seed", "shipment_id", "outer_split", "fold")
+_ASSIGNMENT_COLUMNS = ("split_seed", "shipment_id", "outer_split")
+
+
+def validate_assignments(split_manifest: pd.DataFrame) -> pd.DataFrame:
+    """Return normalized, unique outer-split assignments."""
+    missing = sorted(set(_ASSIGNMENT_COLUMNS) - set(split_manifest.columns))
+    if missing:
+        raise ContractError(f"split manifest is missing columns: {missing}")
+    if split_manifest.empty:
+        raise ContractError("split manifest has no assignments")
+
+    assignments = split_manifest[list(_ASSIGNMENT_COLUMNS)].copy()
+    if assignments.isna().any().any():
+        raise ContractError("split seed, shipment_id, and outer_split must be present")
+    assignments["shipment_id"] = assignments["shipment_id"].astype("string")
+    seeds = pd.to_numeric(assignments["split_seed"], errors="coerce")
+    if seeds.isna().any() or not np.isfinite(seeds).all() or (seeds % 1 != 0).any():
+        raise ContractError("split_seed values must be finite integers")
+    assignments["split_seed"] = seeds.astype("int64")
+    if assignments.duplicated(["split_seed", "shipment_id"]).any():
+        raise ContractError("each shipment must have one split assignment per seed")
+    if not assignments["outer_split"].isin(("train", "test")).all():
+        raise ContractError("outer_split values must be 'train' or 'test'")
+    return assignments
 
 
 def create_splits(

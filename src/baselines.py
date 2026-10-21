@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src import splits
 from src.errors import ContractError, SplitError
 
 _REQUIRED_STACKED = {
@@ -14,7 +15,7 @@ _REQUIRED_STACKED = {
     "final_delay_h",
     "delay_so_far",
 }
-_REQUIRED_SPLITS = {"split_seed", "shipment_id", "outer_split"}
+
 PREDICTION_COLUMNS = (
     "split_seed",
     "shipment_id",
@@ -24,20 +25,12 @@ PREDICTION_COLUMNS = (
 )
 
 
-def predict(stacked: pd.DataFrame, split_manifest: pd.DataFrame) -> pd.DataFrame:
-    """Predict final delay for each outer-test checkpoint with B0, B1, and B2.
-
-    B1's journey means are fitted on distinct outer-training shipments only.
-    The returned table contains held-out rows only, ready for evaluation.
-    """
-    missing_stacked = sorted(_REQUIRED_STACKED - set(stacked.columns))
-    if missing_stacked:
-        raise ContractError(f"stacked table is missing columns: {missing_stacked}")
-    missing_splits = sorted(_REQUIRED_SPLITS - set(split_manifest.columns))
-    if missing_splits:
-        raise ContractError(f"split manifest is missing columns: {missing_splits}")
-    if stacked.empty or split_manifest.empty:
-        raise ContractError("stacked table and split manifest must be non-empty")
+def _validated_rows(stacked: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    missing = sorted(_REQUIRED_STACKED - set(stacked.columns))
+    if missing:
+        raise ContractError(f"stacked table is missing columns: {missing}")
+    if stacked.empty:
+        raise ContractError("stacked table must be non-empty")
 
     rows = stacked[list(_REQUIRED_STACKED)].copy()
     if rows[["shipment_id", "journey_id", "checkpoint"]].isna().any().any():
@@ -54,76 +47,69 @@ def predict(stacked: pd.DataFrame, split_manifest: pd.DataFrame) -> pd.DataFrame
             raise ContractError(f"stacked {column} values must be finite numbers")
         rows[column] = values
 
-    shipment_targets = rows[
-        ["shipment_id", "journey_id", "final_delay_h"]
-    ].drop_duplicates()
-    if shipment_targets["shipment_id"].duplicated().any():
+    targets = rows[["shipment_id", "journey_id", "final_delay_h"]].drop_duplicates()
+    if targets["shipment_id"].duplicated().any():
         raise ContractError("each shipment must have one journey_id and final_delay_h")
+    return rows, targets
 
-    assignments = split_manifest[list(_REQUIRED_SPLITS)].copy()
-    if assignments.isna().any().any():
-        raise ContractError("split seed, shipment_id, and outer_split must be present")
-    assignments["shipment_id"] = assignments["shipment_id"].astype("string")
-    seeds = pd.to_numeric(assignments["split_seed"], errors="coerce")
-    if seeds.isna().any() or not np.isfinite(seeds).all() or (seeds % 1 != 0).any():
-        raise ContractError("split_seed values must be finite integers")
-    assignments["split_seed"] = seeds.astype("int64")
-    if assignments.duplicated(["split_seed", "shipment_id"]).any():
-        raise ContractError("each shipment must have one split assignment per seed")
-    if not assignments["outer_split"].isin(("train", "test")).all():
-        raise ContractError("outer_split values must be 'train' or 'test'")
 
+def _predict_seed(
+    rows: pd.DataFrame,
+    shipment_targets: pd.DataFrame,
+    assignments: pd.DataFrame,
+    seed: int,
+) -> pd.DataFrame:
     expected_ids = set(shipment_targets["shipment_id"])
-    records = []
-    for seed, seed_assignments in assignments.groupby("split_seed", sort=False):
-        assigned_ids = set(seed_assignments["shipment_id"])
-        if assigned_ids != expected_ids:
-            missing_ids = sorted(expected_ids - assigned_ids)
-            unexpected_ids = sorted(assigned_ids - expected_ids)
-            raise ContractError(
-                f"split seed {seed} shipment IDs do not match stacked data; "
-                f"missing: {missing_ids[:5]}, unexpected: {unexpected_ids[:5]}"
-            )
-
-        train_ids = set(
-            seed_assignments.loc[
-                seed_assignments["outer_split"] == "train", "shipment_id"
-            ]
+    assigned_ids = set(assignments["shipment_id"])
+    if assigned_ids != expected_ids:
+        missing = sorted(expected_ids - assigned_ids)
+        unexpected = sorted(assigned_ids - expected_ids)
+        raise ContractError(
+            f"split seed {seed} shipment IDs do not match stacked data; "
+            f"missing: {missing[:5]}, unexpected: {unexpected[:5]}"
         )
-        test_ids = set(
-            seed_assignments.loc[
-                seed_assignments["outer_split"] == "test", "shipment_id"
-            ]
+
+    train_ids = set(
+        assignments.loc[assignments["outer_split"] == "train", "shipment_id"]
+    )
+    test_ids = set(assignments.loc[assignments["outer_split"] == "test", "shipment_id"])
+    if not train_ids or not test_ids:
+        raise SplitError(f"split seed {seed} must have train and test shipments")
+
+    train_targets = shipment_targets[shipment_targets["shipment_id"].isin(train_ids)]
+    journey_means = train_targets.groupby("journey_id")["final_delay_h"].mean()
+    test_rows = rows[rows["shipment_id"].isin(test_ids)].copy()
+    test_rows["journey_mean_h"] = test_rows["journey_id"].map(journey_means)
+    if test_rows["journey_mean_h"].isna().any():
+        unseen = sorted(
+            test_rows.loc[test_rows["journey_mean_h"].isna(), "journey_id"]
+            .astype(str)
+            .unique()
         )
-        if not train_ids or not test_ids:
-            raise SplitError(f"split seed {seed} must have train and test shipments")
-
-        train_targets = shipment_targets[
-            shipment_targets["shipment_id"].isin(train_ids)
-        ]
-        journey_means = train_targets.groupby("journey_id")["final_delay_h"].mean()
-        test_rows = rows[rows["shipment_id"].isin(test_ids)].copy()
-        test_rows["journey_mean_h"] = test_rows["journey_id"].map(journey_means)
-        if test_rows["journey_mean_h"].isna().any():
-            unseen = sorted(
-                test_rows.loc[test_rows["journey_mean_h"].isna(), "journey_id"]
-                .astype(str)
-                .unique()
-            )
-            raise SplitError(
-                f"no outer-training journey mean for split seed {seed}: {unseen[:5]}"
-            )
-
-        predictions = (
-            ("B0", pd.Series(0.0, index=test_rows.index)),
-            ("B1", test_rows["journey_mean_h"]),
-            ("B2", test_rows["delay_so_far"]),
+        raise SplitError(
+            f"no outer-training journey mean for split seed {seed}: {unseen[:5]}"
         )
-        for name, values in predictions:
-            result = test_rows[["shipment_id", "checkpoint"]].copy()
-            result.insert(0, "split_seed", seed)
-            result["baseline"] = name
-            result["predicted_final_delay_h"] = values.to_numpy()
-            records.append(result)
 
-    return pd.concat(records, ignore_index=True).reindex(columns=PREDICTION_COLUMNS)
+    predictions = []
+    for name, values in (
+        ("B0", pd.Series(0.0, index=test_rows.index)),
+        ("B1", test_rows["journey_mean_h"]),
+        ("B2", test_rows["delay_so_far"]),
+    ):
+        result = test_rows[["shipment_id", "checkpoint"]].copy()
+        result.insert(0, "split_seed", seed)
+        result["baseline"] = name
+        result["predicted_final_delay_h"] = values.to_numpy()
+        predictions.append(result)
+    return pd.concat(predictions, ignore_index=True)
+
+
+def predict(stacked: pd.DataFrame, split_manifest: pd.DataFrame) -> pd.DataFrame:
+    """Predict final delay for held-out checkpoints with B0, B1, and B2."""
+    rows, shipment_targets = _validated_rows(stacked)
+    assignments = splits.validate_assignments(split_manifest)
+    predictions = [
+        _predict_seed(rows, shipment_targets, seed_assignments, int(seed))
+        for seed, seed_assignments in assignments.groupby("split_seed", sort=False)
+    ]
+    return pd.concat(predictions, ignore_index=True).reindex(columns=PREDICTION_COLUMNS)

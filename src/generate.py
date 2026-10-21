@@ -154,14 +154,116 @@ def _build_schedule(
 # ---------------------------------------------------------------------------
 
 
+def _propagate_departure(
+    schedule: Schedule, latents: Latents, actuals: dict[str, pd.Timestamp]
+) -> None:
+    actuals["departure"] = _at(schedule.departure, latents.departure_delay_h)
+
+
+def _propagate_leg1(
+    route: Route,
+    schedule: Schedule,
+    latents: Latents,
+    actuals: dict[str, pd.Timestamp],
+) -> None:
+    delay = _delay_hours(actuals["departure"], schedule.departure)
+    own = _weather_delay(latents.weather_leg1) + latents.leg1_noise_h
+    if latents.storm_leg1:
+        own += latents.storm_leg1_h
+    duration = _leg_duration(route.leg1_h, delay, config.TRANSIT_ABSORB)
+    arrival_1 = _at(actuals["departure"], duration + own)
+    if route.hub is not None:
+        actuals["hub_arrival"] = arrival_1
+    else:
+        actuals["port_arrival"] = arrival_1
+
+
+def _propagate_connection(
+    schedule: Schedule,
+    latents: Latents,
+    actuals: dict[str, pd.Timestamp],
+    truth: dict[str, bool],
+) -> None:
+    delay = _delay_hours(actuals["hub_arrival"], schedule.hub_arrival)
+    # The hub absorbs lateness if possible; otherwise the next sailing leaves
+    # NEXT_SAILING_WAIT_H later.
+    slack_remaining = (schedule.hub_buffer_h - config.MIN_CONNECT_H) - delay
+    if slack_remaining < 0:
+        truth["missed_connection"] = True
+        actuals["hub_departure"] = _at(
+            schedule.hub_departure, config.NEXT_SAILING_WAIT_H
+        )
+    else:
+        extra = (
+            config.HUB_HANDLING_FACTOR
+            * (latents.congestion_hub - config.NORMAL_CONGESTION)
+            * config.MIN_CONNECT_H
+            + latents.hub_noise_h
+        )
+        actuals["hub_departure"] = _at(schedule.hub_departure, extra)
+
+
+def _propagate_leg2(
+    route: Route,
+    schedule: Schedule,
+    latents: Latents,
+    actuals: dict[str, pd.Timestamp],
+) -> None:
+    delay = _delay_hours(actuals["hub_departure"], schedule.hub_departure)
+    own = _weather_delay(latents.weather_leg2) + latents.leg2_noise_h
+    if latents.storm_leg2:
+        own += latents.storm_leg2_h
+    duration = _leg_duration(route.leg2_h, delay, config.TRANSIT_ABSORB)
+    actuals["port_arrival"] = _at(actuals["hub_departure"], duration + own)
+
+
+def _propagate_port(
+    norm: config.PortNorm,
+    schedule: Schedule,
+    latents: Latents,
+    actuals: dict[str, pd.Timestamp],
+    truth: dict[str, bool],
+) -> None:
+    # The schedule already allows for normal congestion, so only the
+    # deviation from the port's own norm costs time.
+    delay = _delay_hours(actuals["port_arrival"], schedule.port_arrival)
+    truth["missed_slot"] = delay > config.SLOT_WINDOW_H
+    dwell_extra = (
+        config.CONGESTION_HANDLING_FACTOR
+        * (latents.congestion_port - norm.base_congestion)
+        * norm.dwell_base_h
+        + latents.dwell_noise_h
+        + (config.SLOT_MISS_PENALTY_H if truth["missed_slot"] else 0.0)
+    )
+    actuals["port_done"] = _at(actuals["port_arrival"], norm.dwell_base_h + dwell_extra)
+
+
+def _propagate_customs(
+    norm: config.PortNorm,
+    latents: Latents,
+    actuals: dict[str, pd.Timestamp],
+) -> None:
+    customs_extra = (
+        config.CONGESTION_HANDLING_FACTOR
+        * (latents.congestion_port - norm.base_congestion)
+        * norm.customs_base_h
+        + latents.customs_noise_h
+    )
+    actuals["customs"] = _at(actuals["port_done"], norm.customs_base_h + customs_extra)
+
+
+def _propagate_delivery(
+    latents: Latents, actuals: dict[str, pd.Timestamp], schedule: Schedule
+) -> None:
+    delay = _delay_hours(actuals["customs"], schedule.customs)
+    duration = _leg_duration(config.TRUCK_BASE_H, delay, config.TRUCK_ABSORB)
+    actuals["delivery"] = _at(actuals["customs"], duration + latents.truck_delay_h)
+
+
 def _propagate(
     route: Route, schedule: Schedule, latents: Latents
 ) -> tuple[dict[str, pd.Timestamp], dict[str, bool]]:
-    """Walk the stages in order, carrying the accumulated delay in hours.
-
-    The delay is always read back off the timestamps, so the numbers can never
-    drift away from the data that ends up in the CSV.
-    """
+    """Propagate actual timestamps through the stages in order."""
     norm = config.PORT_NORMS[route.destination]
     actuals: dict[str, pd.Timestamp] = {}
     truth = {
@@ -171,80 +273,14 @@ def _propagate(
         "storm_leg2": latents.storm_leg2,
     }
 
-    # --- departure -------------------------------------------------------
-    actuals["departure"] = _at(schedule.departure, latents.departure_delay_h)
-    delay = _delay_hours(actuals["departure"], schedule.departure)
-
-    # --- leg 1: ocean transit to the hub, or straight to the port --------
-    own = _weather_delay(latents.weather_leg1) + latents.leg1_noise_h
-    if latents.storm_leg1:
-        own += latents.storm_leg1_h
-    duration = _leg_duration(route.leg1_h, delay, config.TRANSIT_ABSORB)
-    arrival_1 = _at(actuals["departure"], duration + own)
-    leg1_target = (
-        schedule.hub_arrival if route.hub is not None else schedule.port_arrival
-    )
-    delay = _delay_hours(arrival_1, leg1_target)
-
+    _propagate_departure(schedule, latents, actuals)
+    _propagate_leg1(route, schedule, latents, actuals)
     if route.hub is not None:
-        actuals["hub_arrival"] = arrival_1
-
-        # The hub buffer absorbs the lateness it can.  Either the cargo makes
-        # the connection - and the lateness is gone - or it misses the sailing
-        # and the next one leaves NEXT_SAILING_WAIT_H later.
-        slack_remaining = (schedule.hub_buffer_h - config.MIN_CONNECT_H) - delay
-        if slack_remaining < 0:
-            truth["missed_connection"] = True
-            actuals["hub_departure"] = _at(
-                schedule.hub_departure, config.NEXT_SAILING_WAIT_H
-            )
-        else:
-            extra = (
-                config.HUB_HANDLING_FACTOR
-                * (latents.congestion_hub - config.NORMAL_CONGESTION)
-                * config.MIN_CONNECT_H
-                + latents.hub_noise_h
-            )
-            actuals["hub_departure"] = _at(schedule.hub_departure, extra)
-        delay = _delay_hours(actuals["hub_departure"], schedule.hub_departure)
-
-        # --- leg 2: ocean transit from the hub to the destination port ----
-        own = _weather_delay(latents.weather_leg2) + latents.leg2_noise_h
-        if latents.storm_leg2:
-            own += latents.storm_leg2_h
-        duration = _leg_duration(route.leg2_h, delay, config.TRANSIT_ABSORB)
-        actuals["port_arrival"] = _at(actuals["hub_departure"], duration + own)
-        delay = _delay_hours(actuals["port_arrival"], schedule.port_arrival)
-    else:
-        actuals["port_arrival"] = arrival_1
-
-    # --- port handling: dwell and customs --------------------------------
-    # The schedule already allows for normal congestion, so only the
-    # deviation from the port's own norm costs time.
-    truth["missed_slot"] = delay > config.SLOT_WINDOW_H
-
-    dwell_extra = (
-        config.CONGESTION_HANDLING_FACTOR
-        * (latents.congestion_port - norm.base_congestion)
-        * norm.dwell_base_h
-        + latents.dwell_noise_h
-        + (config.SLOT_MISS_PENALTY_H if truth["missed_slot"] else 0.0)
-    )
-    actuals["port_done"] = _at(actuals["port_arrival"], norm.dwell_base_h + dwell_extra)
-    delay = _delay_hours(actuals["port_done"], schedule.port_done)
-
-    customs_extra = (
-        config.CONGESTION_HANDLING_FACTOR
-        * (latents.congestion_port - norm.base_congestion)
-        * norm.customs_base_h
-        + latents.customs_noise_h
-    )
-    actuals["customs"] = _at(actuals["port_done"], norm.customs_base_h + customs_extra)
-    delay = _delay_hours(actuals["customs"], schedule.customs)
-
-    # --- last mile by road ------------------------------------------------
-    duration = _leg_duration(config.TRUCK_BASE_H, delay, config.TRUCK_ABSORB)
-    actuals["delivery"] = _at(actuals["customs"], duration + latents.truck_delay_h)
+        _propagate_connection(schedule, latents, actuals, truth)
+        _propagate_leg2(route, schedule, latents, actuals)
+    _propagate_port(norm, schedule, latents, actuals, truth)
+    _propagate_customs(norm, latents, actuals)
+    _propagate_delivery(latents, actuals, schedule)
 
     return actuals, truth
 

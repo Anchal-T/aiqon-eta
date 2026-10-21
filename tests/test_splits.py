@@ -6,9 +6,10 @@ from dataclasses import replace
 
 import pandas as pd
 import pytest
-from src.pipeline import ArtifactPaths
 
 from src import checkpoints, config, ingest, splits
+from src.errors import SplitError
+from src.pipeline import ArtifactPaths
 
 
 @pytest.fixture(scope="module")
@@ -85,13 +86,9 @@ def test_a_shipment_cannot_have_multiple_journeys(stacked):
         splits.create_splits(broken, settings=settings)
 
 
-def test_invalid_split_settings_are_rejected(stacked):
-    with pytest.raises(ValueError, match="test fraction"):
-        settings = replace(config.DEFAULT_RUN_SETTINGS, test_frac=1.0)
-        splits.create_splits(stacked, settings=settings)
-    with pytest.raises(ValueError, match="at least two CV folds"):
-        settings = replace(config.DEFAULT_RUN_SETTINGS, cv_folds=1)
-        splits.create_splits(stacked, settings=settings)
-    with pytest.raises(ValueError, match="non-empty and unique"):
-        settings = replace(config.DEFAULT_RUN_SETTINGS, n_split_seeds=0)
+def test_unsplittable_journeys_raise_split_error():
+    stacked = pd.DataFrame({"shipment_id": ["S1", "S2"], "journey_id": ["J1", "J2"]})
+    settings = replace(config.DEFAULT_RUN_SETTINGS, n_split_seeds=1)
+
+    with pytest.raises(SplitError, match="cannot create stratified split"):
         splits.create_splits(stacked, settings=settings)

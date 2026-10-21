@@ -115,6 +115,115 @@ def _category_code(column: str, value: Any) -> int:
         raise ContractError(f"unknown {column} category: {value}") from error
 
 
+def _add_schedule_features(
+    record: dict[str, object],
+    shipment: Any,
+    is_connecting: bool,
+    norm: config.PortNorm,
+) -> None:
+    departure = shipment["sched_departure"]
+    port_arrival = shipment["sched_port_arrival"]
+    record["planned_total_h"] = _hours(shipment["sched_delivery"], departure)
+    record["planned_leg1_h"] = _hours(
+        shipment["sched_hub_arrival"] if is_connecting else port_arrival,
+        departure,
+    )
+    if is_connecting:
+        record["planned_leg2_h"] = _hours(port_arrival, shipment["sched_hub_departure"])
+        record["hub_buffer_h"] = float(shipment["hub_buffer_h"])
+        record["nominal_slack_h"] = (
+            float(shipment["hub_buffer_h"]) - config.MIN_CONNECT_H
+        )
+
+    record["sched_dep_dow"] = departure.dayofweek
+    record["sched_arrival_dow"] = port_arrival.dayofweek
+    record["sched_dep_doy"] = departure.dayofyear
+    record["port_dwell_base_h"] = norm.dwell_base_h
+    record["port_customs_base_h"] = norm.customs_base_h
+    record["port_base_congestion"] = norm.base_congestion
+
+
+def _add_observed_delay_features(
+    record: dict[str, object], delay_row: Any, visible: tuple[str, ...]
+) -> float:
+    known_delays = []
+    for stage in OBSERVED_STAGES:
+        if stage not in visible:
+            continue
+        record[f"delay_{stage}"] = delay_row[f"delay_{stage}"]
+        if stage != "departure":
+            record[f"added_{stage}"] = delay_row[f"added_{stage}"]
+        value = delay_row[f"delay_{stage}"]
+        if pd.notna(value):
+            known_delays.append(float(value))
+
+    delay_so_far = known_delays[-1] if known_delays else 0.0
+    record["delay_so_far"] = delay_so_far
+    record["n_observed_stages"] = len(known_delays)
+    return delay_so_far
+
+
+def _add_checkpoint_gated_features(
+    record: dict[str, object],
+    shipment: Any,
+    delay_row: Any,
+    checkpoint: int,
+    is_connecting: bool,
+    norm: config.PortNorm,
+) -> None:
+    def is_visible(feature: str) -> bool:
+        return checkpoints.feature_is_visible(feature, checkpoint, is_connecting)
+
+    if is_visible("weather_leg1"):
+        record["weather_leg1"] = shipment["weather_leg1"]
+    if is_visible("congestion_hub"):
+        record["congestion_hub"] = shipment["congestion_hub"]
+    if is_visible("slack_remaining"):
+        hub_arrival_delay = delay_row["delay_hub_arrival"]
+        if pd.notna(hub_arrival_delay):
+            record["slack_remaining"] = record["nominal_slack_h"] - hub_arrival_delay
+    if is_visible("weather_leg2"):
+        record["weather_leg2"] = shipment["weather_leg2"]
+    if is_visible("congestion_port"):
+        record["congestion_port"] = shipment["congestion_port"]
+    if is_visible("arrival_dow"):
+        record["arrival_dow"] = shipment["arrival_dow"]
+    if is_visible("slot_margin"):
+        port_arrival_delay = delay_row["delay_port_arrival"]
+        if pd.notna(port_arrival_delay):
+            record["slot_margin"] = config.SLOT_WINDOW_H - port_arrival_delay
+    if is_visible("cong_x_dwell"):
+        record["cong_x_dwell"] = shipment["congestion_port"] * norm.dwell_base_h
+    if is_visible("cong_x_customs"):
+        record["cong_x_customs"] = shipment["congestion_port"] * norm.customs_base_h
+
+    port_done = shipment["act_port_done"]
+    if is_visible("port_done_missing"):
+        record["port_done_missing"] = int(pd.isna(port_done))
+    if pd.notna(port_done):
+        if is_visible("port_done_dow"):
+            record["port_done_dow"] = port_done.dayofweek
+        if is_visible("port_done_is_weekend"):
+            record["port_done_is_weekend"] = int(port_done.dayofweek >= 5)
+    if is_visible("customs_missing"):
+        record["customs_missing"] = int(pd.isna(shipment["act_customs"]))
+
+
+def _add_target_features(
+    record: dict[str, object],
+    shipment_id: Any,
+    delay_row: Any,
+    delay_so_far: float,
+    settings: config.RunSettings,
+) -> None:
+    final_delay = float(delay_row["final_delay_h"])
+    if not np.isfinite(final_delay):
+        raise ContractError(f"non-finite final delay for shipment {shipment_id}")
+    record["final_delay_h"] = final_delay
+    record["remaining_delay_h"] = final_delay - delay_so_far
+    record["is_delayed"] = final_delay > settings.delay_threshold_h
+
+
 def _build_feature_row(
     shipment: Any,
     delay_row: Any,
@@ -137,86 +246,14 @@ def _build_feature_row(
     record["is_connecting"] = int(is_connecting)
     record["n_legs"] = 2 if is_connecting else 1
 
-    departure = shipment["sched_departure"]
-    port_arrival = shipment["sched_port_arrival"]
-    record["planned_total_h"] = _hours(shipment["sched_delivery"], departure)
-    record["planned_leg1_h"] = _hours(
-        shipment["sched_hub_arrival"] if is_connecting else port_arrival,
-        departure,
+    _add_schedule_features(record, shipment, is_connecting, norm)
+    delay_so_far = _add_observed_delay_features(record, delay_row, visible)
+    _add_checkpoint_gated_features(
+        record, shipment, delay_row, checkpoint, is_connecting, norm
     )
-    if is_connecting:
-        record["planned_leg2_h"] = _hours(port_arrival, shipment["sched_hub_departure"])
-        record["hub_buffer_h"] = float(shipment["hub_buffer_h"])
-        record["nominal_slack_h"] = (
-            float(shipment["hub_buffer_h"]) - config.MIN_CONNECT_H
-        )
-
-    record["sched_dep_dow"] = departure.dayofweek
-    record["sched_arrival_dow"] = port_arrival.dayofweek
-    record["sched_dep_doy"] = departure.dayofyear
-    record["port_dwell_base_h"] = norm.dwell_base_h
-    record["port_customs_base_h"] = norm.customs_base_h
-    record["port_base_congestion"] = norm.base_congestion
-
-    known_delays = []
-    for stage in OBSERVED_STAGES:
-        if stage not in visible:
-            continue
-        record[f"delay_{stage}"] = delay_row[f"delay_{stage}"]
-        if stage != "departure":
-            record[f"added_{stage}"] = delay_row[f"added_{stage}"]
-        value = delay_row[f"delay_{stage}"]
-        if pd.notna(value):
-            known_delays.append(float(value))
-
-    delay_so_far = known_delays[-1] if known_delays else 0.0
-    record["delay_so_far"] = delay_so_far
-    record["n_observed_stages"] = len(known_delays)
-
-    if checkpoints.feature_is_visible("weather_leg1", checkpoint, is_connecting):
-        record["weather_leg1"] = shipment["weather_leg1"]
-    if checkpoints.feature_is_visible("congestion_hub", checkpoint, is_connecting):
-        record["congestion_hub"] = shipment["congestion_hub"]
-    if checkpoints.feature_is_visible("slack_remaining", checkpoint, is_connecting):
-        hub_arrival_delay = delay_row["delay_hub_arrival"]
-        if pd.notna(hub_arrival_delay):
-            record["slack_remaining"] = record["nominal_slack_h"] - hub_arrival_delay
-    if checkpoints.feature_is_visible("weather_leg2", checkpoint, is_connecting):
-        record["weather_leg2"] = shipment["weather_leg2"]
-    if checkpoints.feature_is_visible("congestion_port", checkpoint, is_connecting):
-        record["congestion_port"] = shipment["congestion_port"]
-    if checkpoints.feature_is_visible("arrival_dow", checkpoint, is_connecting):
-        record["arrival_dow"] = shipment["arrival_dow"]
-    if checkpoints.feature_is_visible("slot_margin", checkpoint, is_connecting):
-        port_arrival_delay = delay_row["delay_port_arrival"]
-        if pd.notna(port_arrival_delay):
-            record["slot_margin"] = config.SLOT_WINDOW_H - port_arrival_delay
-    if checkpoints.feature_is_visible("cong_x_dwell", checkpoint, is_connecting):
-        record["cong_x_dwell"] = shipment["congestion_port"] * norm.dwell_base_h
-    if checkpoints.feature_is_visible("cong_x_customs", checkpoint, is_connecting):
-        record["cong_x_customs"] = shipment["congestion_port"] * norm.customs_base_h
-
-    port_done = shipment["act_port_done"]
-    if checkpoints.feature_is_visible("port_done_missing", checkpoint, is_connecting):
-        record["port_done_missing"] = int(pd.isna(port_done))
-    if pd.notna(port_done):
-        if checkpoints.feature_is_visible("port_done_dow", checkpoint, is_connecting):
-            record["port_done_dow"] = port_done.dayofweek
-        if checkpoints.feature_is_visible(
-            "port_done_is_weekend", checkpoint, is_connecting
-        ):
-            record["port_done_is_weekend"] = int(port_done.dayofweek >= 5)
-    if checkpoints.feature_is_visible("customs_missing", checkpoint, is_connecting):
-        record["customs_missing"] = int(pd.isna(shipment["act_customs"]))
-
-    final_delay = float(delay_row["final_delay_h"])
-    if not np.isfinite(final_delay):
-        raise ContractError(
-            f"non-finite final delay for shipment {shipment['shipment_id']}"
-        )
-    record["final_delay_h"] = final_delay
-    record["remaining_delay_h"] = final_delay - delay_so_far
-    record["is_delayed"] = final_delay > settings.delay_threshold_h
+    _add_target_features(
+        record, shipment["shipment_id"], delay_row, delay_so_far, settings
+    )
     return record
 
 
