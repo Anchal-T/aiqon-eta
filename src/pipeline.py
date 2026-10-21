@@ -39,6 +39,7 @@ _PipelineStageName = Literal[
     "model_q",
     "model_c",
     "interval_evaluation",
+    "classification_evaluation",
 ]
 
 
@@ -59,6 +60,8 @@ class ArtifactPaths:
     model_q_predictions: Path = Path("outputs/predictions/model_q.csv")
     model_q_metrics: Path = Path("outputs/metrics/model_q_coverage.csv")
     model_c_predictions: Path = Path("outputs/predictions/model_c.csv")
+    model_c_reliability: Path = Path("outputs/metrics/model_c_reliability.csv")
+    model_c_reliability_plot: Path = Path("outputs/metrics/model_c_reliability.png")
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,9 @@ _PIPELINE_STAGES: dict[_PipelineStageName, _PipelineStage] = {
     "model_q": _PipelineStage("build_model_q", ("splits",)),
     "model_c": _PipelineStage("build_model_c", ("splits",)),
     "interval_evaluation": _PipelineStage("build_interval_evaluation", ("model_q",)),
+    "classification_evaluation": _PipelineStage(
+        "build_model_c_evaluation", ("model_c",)
+    ),
 }
 
 
@@ -153,6 +159,13 @@ _CLI_TARGETS = {
         explicit_method="build_interval_evaluation",
         explicit_inputs=("model_q",),
         output_fields=("model_q_metrics",),
+    ),
+    "eval-c": _CliTarget(
+        stage="classification_evaluation",
+        path_args=("model-c", "out"),
+        explicit_method="build_model_c_evaluation",
+        explicit_inputs=("model_c",),
+        output_fields=("model_c_reliability", "model_c_reliability_plot"),
     ),
 }
 
@@ -292,6 +305,17 @@ class EtaPipeline:
         metrics = evaluate.evaluate_model_q_intervals(predictions)
         _write_artifact(metrics, self.paths.model_q_metrics)
 
+    def build_model_c_evaluation(self, model_c_path: Path | None = None) -> None:
+        """Report and plot the held-out Model C reliability curve."""
+        predictions = _read_artifact(
+            model_c_path if model_c_path is not None else self.paths.model_c_predictions
+        )
+        reliability = evaluate.evaluate_model_c_reliability(predictions)
+        evaluate.plot_model_c_reliability(
+            reliability, self.paths.model_c_reliability_plot
+        )
+        _write_artifact(reliability, self.paths.model_c_reliability)
+
     def run_to(self, target: _PipelineStageName) -> None:
         """Run the target's prerequisites once, without unrelated branches."""
         self._run_targets((target,))
@@ -315,7 +339,9 @@ class EtaPipeline:
 
     def run_all(self) -> None:
         """Run every implemented model and evaluation branch once."""
-        self._run_targets(("evaluation", "interval_evaluation", "model_c"))
+        self._run_targets(
+            ("evaluation", "interval_evaluation", "classification_evaluation")
+        )
 
 
 def _write_artifact(table: pd.DataFrame, path: Path) -> None:

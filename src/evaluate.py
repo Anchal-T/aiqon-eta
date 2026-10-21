@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
-from src.errors import ContractError
+from src.errors import ArtifactError, ContractError
 
 _KEYS = ("split_seed", "shipment_id", "checkpoint")
 _MODEL_COLUMNS = (*_KEYS, "actual_final_delay_h", "predicted_final_delay_h")
@@ -17,6 +19,12 @@ _Q_COLUMNS = (
     "predicted_final_upper_h",
     "quantiles_crossed",
 )
+_C_COLUMNS = (
+    *_KEYS,
+    "actual_is_delayed",
+    "predicted_delay_probability",
+)
+_RELIABILITY_BINS = 10
 
 
 def _validated_prediction_keys(table: pd.DataFrame) -> pd.DataFrame:
@@ -117,6 +125,114 @@ def compare_model_r_to_b2(
         np.nan,
     )
     return summary
+
+
+def _validated_model_c_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
+    missing = sorted(set(_C_COLUMNS) - set(predictions.columns))
+    if missing:
+        raise ContractError(f"Model C predictions are missing columns: {missing}")
+    if predictions.empty:
+        raise ContractError("Model C predictions must be non-empty")
+
+    table = _validated_prediction_keys(predictions[list(_C_COLUMNS)].copy())
+    labels = pd.to_numeric(table["actual_is_delayed"], errors="coerce")
+    if (
+        labels.isna().any()
+        or not np.isfinite(labels).all()
+        or not labels.isin((0, 1)).all()
+    ):
+        raise ContractError("Model C actual_is_delayed values must be binary labels")
+    probabilities = pd.to_numeric(table["predicted_delay_probability"], errors="coerce")
+    if (
+        probabilities.isna().any()
+        or not np.isfinite(probabilities).all()
+        or ((probabilities < 0) | (probabilities > 1)).any()
+    ):
+        raise ContractError(
+            "Model C predicted_delay_probability values must be between 0 and 1"
+        )
+
+    table["actual_is_delayed"] = labels.astype("int8")
+    table["predicted_delay_probability"] = probabilities
+    return table
+
+
+def evaluate_model_c_reliability(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Return equal-width calibration bins for held-out Model C probabilities."""
+    table = _validated_model_c_predictions(predictions)
+    bins = (table["predicted_delay_probability"] * _RELIABILITY_BINS).astype("int64")
+    table["probability_bin"] = np.minimum(bins, _RELIABILITY_BINS - 1)
+    table["bin_lower"] = table["probability_bin"] / _RELIABILITY_BINS
+    table["bin_upper"] = (table["probability_bin"] + 1) / _RELIABILITY_BINS
+
+    curve = table.groupby(["checkpoint", "probability_bin"], as_index=False).agg(
+        bin_lower=("bin_lower", "first"),
+        bin_upper=("bin_upper", "first"),
+        mean_predicted_probability=("predicted_delay_probability", "mean"),
+        observed_delay_rate=("actual_is_delayed", "mean"),
+        n_predictions=("actual_is_delayed", "size"),
+    )
+    return curve[
+        [
+            "checkpoint",
+            "probability_bin",
+            "bin_lower",
+            "bin_upper",
+            "mean_predicted_probability",
+            "observed_delay_rate",
+            "n_predictions",
+        ]
+    ]
+
+
+def plot_model_c_reliability(reliability: pd.DataFrame, path: Path) -> None:
+    """Save the Model C reliability curve with one line per checkpoint."""
+    required = {
+        "checkpoint",
+        "mean_predicted_probability",
+        "observed_delay_rate",
+    }
+    missing = sorted(required - set(reliability.columns))
+    if missing:
+        raise ContractError(f"Model C reliability data is missing columns: {missing}")
+    if reliability.empty:
+        raise ContractError("Model C reliability data must be non-empty")
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as error:
+        raise ArtifactError(
+            "matplotlib is required to write the reliability plot"
+        ) from error
+
+    figure, axis = plt.subplots(figsize=(7, 7))
+    try:
+        for checkpoint, rows in reliability.groupby("checkpoint", sort=True):
+            axis.plot(
+                rows["mean_predicted_probability"],
+                rows["observed_delay_rate"],
+                marker="o",
+                label=f"Checkpoint {checkpoint}",
+            )
+        axis.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Perfect")
+        axis.set(
+            xlim=(0, 1),
+            ylim=(0, 1),
+            xlabel="Mean predicted delay probability",
+            ylabel="Observed delay rate",
+            title="Model C reliability by checkpoint",
+        )
+        axis.grid(alpha=0.25)
+        axis.legend()
+        figure.tight_layout()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=150)
+    except OSError as error:
+        raise ArtifactError(
+            f"cannot write Model C reliability plot {path}: {error}"
+        ) from error
+    finally:
+        plt.close(figure)
 
 
 def evaluate_model_q_intervals(predictions: pd.DataFrame) -> pd.DataFrame:

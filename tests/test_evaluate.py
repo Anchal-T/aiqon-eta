@@ -3,7 +3,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.evaluate import compare_model_r_to_b2, evaluate_model_q_intervals
+from src.errors import ContractError
+from src.evaluate import (
+    compare_model_r_to_b2,
+    evaluate_model_c_reliability,
+    evaluate_model_q_intervals,
+)
 
 
 def test_model_r_comparison_reports_held_out_mae_by_checkpoint():
@@ -72,3 +77,54 @@ def test_model_q_interval_metrics_report_coverage_width_and_crossings():
     assert metrics["mean_width_h"] == pytest.approx(4.25)
     assert metrics["quantile_crossing_rate"] == pytest.approx(0.25)
     assert metrics["n_split_seeds"] == 2
+
+
+def test_model_c_reliability_reports_observed_rate_by_checkpoint_and_bin():
+    predictions = pd.DataFrame(
+        [
+            (1, "A", 2, 0, 0.05),
+            (1, "B", 2, 1, 0.09),
+            (1, "C", 2, 1, 0.15),
+            (1, "D", 2, 1, 0.85),
+            (1, "E", 2, 0, 1.0),
+            (2, "A", 3, 1, 0.95),
+        ],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "actual_is_delayed",
+            "predicted_delay_probability",
+        ),
+    )
+
+    curve = evaluate_model_c_reliability(predictions)
+
+    assert curve["checkpoint"].tolist() == [2, 2, 2, 2, 3]
+    assert curve["probability_bin"].tolist() == [0, 1, 8, 9, 9]
+    assert curve["mean_predicted_probability"].tolist() == pytest.approx(
+        [0.07, 0.15, 0.85, 1.0, 0.95]
+    )
+    assert curve["observed_delay_rate"].tolist() == [0.5, 1.0, 1.0, 0.0, 1.0]
+    assert curve["n_predictions"].tolist() == [2, 1, 1, 1, 1]
+
+
+def test_model_c_reliability_rejects_non_binary_labels_and_invalid_probabilities():
+    predictions = pd.DataFrame(
+        [(1, "A", 2, 2, 0.5)],
+        columns=(
+            "split_seed",
+            "shipment_id",
+            "checkpoint",
+            "actual_is_delayed",
+            "predicted_delay_probability",
+        ),
+    )
+
+    with pytest.raises(ContractError, match="binary labels"):
+        evaluate_model_c_reliability(predictions)
+
+    predictions["actual_is_delayed"] = 1
+    predictions["predicted_delay_probability"] = 1.1
+    with pytest.raises(ContractError, match="values must be between 0 and 1"):
+        evaluate_model_c_reliability(predictions)

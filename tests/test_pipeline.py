@@ -27,6 +27,14 @@ def _temporary_paths(tmp_path: Path) -> ArtifactPaths:
         model_q_predictions=tmp_path / "outputs" / "predictions" / "model_q.csv",
         model_q_metrics=tmp_path / "outputs" / "metrics" / "model_q_coverage.csv",
         model_c_predictions=tmp_path / "outputs" / "predictions" / "model_c.csv",
+        model_c_reliability=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_c_reliability.csv",
+        model_c_reliability_plot=tmp_path
+        / "outputs"
+        / "metrics"
+        / "model_c_reliability.png",
     )
 
 
@@ -80,6 +88,22 @@ def test_model_c_target_skips_baseline_and_regression_models(monkeypatch):
     assert calls == ["data", "features", "splits", "model_c"]
 
 
+def test_model_c_evaluation_target_builds_only_its_prerequisites(monkeypatch):
+    pipeline = EtaPipeline()
+    calls = []
+    for stage in ("data", "features", "splits", "model_c", "model_c_evaluation"):
+        method = (
+            "build_model_c_evaluation"
+            if stage == "model_c_evaluation"
+            else f"build_{stage}"
+        )
+        monkeypatch.setattr(pipeline, method, lambda stage=stage: calls.append(stage))
+
+    pipeline.run_to("classification_evaluation")
+
+    assert calls == ["data", "features", "splits", "model_c", "model_c_evaluation"]
+
+
 def test_run_all_executes_shared_prerequisites_once(monkeypatch):
     pipeline = EtaPipeline()
     calls = []
@@ -93,6 +117,7 @@ def test_run_all_executes_shared_prerequisites_once(monkeypatch):
         "model_q",
         "interval_evaluation",
         "model_c",
+        "model_c_evaluation",
     ):
         monkeypatch.setattr(
             pipeline,
@@ -112,6 +137,7 @@ def test_run_all_executes_shared_prerequisites_once(monkeypatch):
         "model_q",
         "interval_evaluation",
         "model_c",
+        "model_c_evaluation",
     ]
 
 
@@ -136,6 +162,8 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
             paths.model_q_predictions,
             paths.model_q_metrics,
             paths.model_c_predictions,
+            paths.model_c_reliability,
+            paths.model_c_reliability_plot,
         )
     )
     assert (
@@ -183,6 +211,11 @@ def test_run_all_writes_expected_artifacts_in_temporary_paths(tmp_path):
     assert classification["actual_is_delayed"].isin((0, 1)).all()
     assert np.isfinite(probabilities).all()
     assert probabilities.between(0, 1).all()
+    reliability = pd.read_csv(paths.model_c_reliability)
+    assert set(reliability["checkpoint"]) == set(range(7))
+    assert reliability["observed_delay_rate"].between(0, 1).all()
+    assert reliability["n_predictions"].gt(0).all()
+    assert paths.model_c_reliability_plot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_artifact_read_error_includes_path_and_cause(tmp_path):
@@ -291,6 +324,39 @@ def test_model_c_cli_starts_from_explicit_inputs(monkeypatch):
         == 0
     )
     assert calls == [(stacked, split_manifest, output_dir / "model_c.csv")]
+
+
+def test_model_c_evaluation_cli_starts_from_explicit_predictions(monkeypatch):
+    predictions = Path("existing/model_c.csv")
+    output_dir = Path("custom/output")
+    calls = []
+    monkeypatch.setattr(
+        EtaPipeline,
+        "build_model_c_evaluation",
+        lambda self, model_c_path=None: calls.append(
+            (
+                model_c_path,
+                self.paths.model_c_reliability,
+                self.paths.model_c_reliability_plot,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        EtaPipeline,
+        "run_to",
+        lambda self, target: pytest.fail("explicit inputs must skip prerequisites"),
+    )
+
+    assert (
+        main(["eval-c", "--model-c", str(predictions), "--out", str(output_dir)]) == 0
+    )
+    assert calls == [
+        (
+            predictions,
+            output_dir / "model_c_reliability.csv",
+            output_dir / "model_c_reliability.png",
+        )
+    ]
 
 
 def test_splits_cli_starts_from_explicit_stacked_input(monkeypatch):
